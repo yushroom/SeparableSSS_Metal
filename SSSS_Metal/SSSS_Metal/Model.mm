@@ -12,19 +12,14 @@
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 
+
 void Model::_loadMeshFromFile(const std::string& str_path)
 {
-    _triangles.clear();
     _vertices.clear();
     _normals.clear();
     _uv.clear();
-    _triangles.clear();
+    _indices.clear();
     _bitangent.clear();
-    //		if (_access(str_path.c_str(), 0) == -1)
-    //		{
-    //			Debug::LogError("Model file " + str_path + " not exists!");
-    //			return;
-    //		}
     
     Assimp::Importer importer;
     const char* path = str_path.c_str();
@@ -57,7 +52,7 @@ void Model::_loadMeshFromFile(const std::string& str_path)
     if (_use_uv) _uv.reserve(nvertices);
     if (_use_tangent) _tangent.reserve(nvertices);
     if (_use_bitangent) _bitangent.reserve(nvertices);
-    _triangles.resize(ntriangles * 3);	// TODO, *3?
+    _indices.resize(ntriangles * 3);	// TODO, *3?
     int idx = 0;
     int idx2 = 0;
     for (unsigned int i = 0; i < scene->mNumMeshes; i++)
@@ -102,9 +97,9 @@ void Model::_loadMeshFromFile(const std::string& str_path)
         {
             const aiFace& Face = mesh->mFaces[j];
             assert(Face.mNumIndices == 3);
-            _triangles[idx++] = Face.mIndices[0] + idx2;
-            _triangles[idx++] = Face.mIndices[1] + idx2;
-            _triangles[idx++] = Face.mIndices[2] + idx2;
+            _indices[idx++] = Face.mIndices[0] + idx2;
+            _indices[idx++] = Face.mIndices[1] + idx2;
+            _indices[idx++] = Face.mIndices[2] + idx2;
         }
         idx2 += mesh->mNumVertices;
     }

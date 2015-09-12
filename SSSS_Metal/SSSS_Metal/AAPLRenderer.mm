@@ -6,14 +6,29 @@
  Metal Renderer for Metal Basic 3D. Acts as the update and render delegate for the view controller and performs rendering. In MetalBasic3D, the renderer draws 2 cubes, whos color values change every update.
  */
 
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
 #import "AAPLRenderer.h"
 #import "AAPLViewController.h"
 #import "AAPLView.h"
 #import "AAPLTransforms.h"
 #import "AAPLSharedTypes.h"
 
-#include "PathHelper.h"
+#include "RenderContex.h"
+#include "Utilities.h"
 #include "Model.h"
+#include "TextureLoader.h"
+
+#include "RenderTarget.h"
+
+#include "Camera.h"
+#include "Light.hpp"
+
+#define CAMERA_FOV 20.0f
+#define PI 3.1415926536f
+
+#define N_LIGHTS 3
 
 using namespace AAPL;
 using namespace simd;
@@ -21,94 +36,69 @@ using namespace simd;
 static const long kInFlightCommandBuffers = 3;
 
 static const NSUInteger kNumberOfBoxes = 2;
-static const float4 kBoxAmbientColors[2] = {
+static const vec4 kBoxAmbientColors[2] = {
     {0.18, 0.24, 0.8, 1.0},
     {0.8, 0.24, 0.1, 1.0}
 };
 
-static const float4 kBoxDiffuseColors[2] = {
+static const vec4 kBoxDiffuseColors[2] = {
     {0.4, 0.4, 1.0, 1.0},
     {0.8, 0.4, 0.4, 1.0}
 };
 
-static const float kFOVY    = 65.0f;
-static const float3 kEye    = {0.0f, 0.0f, 0.0f};
-static const float3 kCenter = {0.0f, 0.0f, 1.0f};
-static const float3 kUp     = {0.0f, 1.0f, 0.0f};
-
-static const float kWidth  = 0.75f;
-static const float kHeight = 0.75f;
-static const float kDepth  = 0.75f;
-
-static const float kCubeVertexData[] =
-{
-    kWidth, -kHeight, kDepth,   0.0, -1.0,  0.0,
-    -kWidth, -kHeight, kDepth,   0.0, -1.0, 0.0,
-    -kWidth, -kHeight, -kDepth,   0.0, -1.0,  0.0,
-    kWidth, -kHeight, -kDepth,  0.0, -1.0,  0.0,
-    kWidth, -kHeight, kDepth,   0.0, -1.0,  0.0,
-    -kWidth, -kHeight, -kDepth,   0.0, -1.0,  0.0,
-    
-    kWidth, kHeight, kDepth,    1.0, 0.0,  0.0,
-    kWidth, -kHeight, kDepth,   1.0,  0.0,  0.0,
-    kWidth, -kHeight, -kDepth,  1.0,  0.0,  0.0,
-    kWidth, kHeight, -kDepth,   1.0, 0.0,  0.0,
-    kWidth, kHeight, kDepth,    1.0, 0.0,  0.0,
-    kWidth, -kHeight, -kDepth,  1.0,  0.0,  0.0,
-    
-    -kWidth, kHeight, kDepth,    0.0, 1.0,  0.0,
-    kWidth, kHeight, kDepth,    0.0, 1.0,  0.0,
-    kWidth, kHeight, -kDepth,   0.0, 1.0,  0.0,
-    -kWidth, kHeight, -kDepth,   0.0, 1.0,  0.0,
-    -kWidth, kHeight, kDepth,    0.0, 1.0,  0.0,
-    kWidth, kHeight, -kDepth,   0.0, 1.0,  0.0,
-    
-    -kWidth, -kHeight, kDepth,  -1.0,  0.0, 0.0,
-    -kWidth, kHeight, kDepth,   -1.0, 0.0,  0.0,
-    -kWidth, kHeight, -kDepth,  -1.0, 0.0,  0.0,
-    -kWidth, -kHeight, -kDepth,  -1.0,  0.0,  0.0,
-    -kWidth, -kHeight, kDepth,  -1.0,  0.0, 0.0,
-    -kWidth, kHeight, -kDepth,  -1.0, 0.0,  0.0,
-    
-    kWidth, kHeight,  kDepth,  0.0, 0.0,  1.0,
-    -kWidth, kHeight,  kDepth,  0.0, 0.0,  1.0,
-    -kWidth, -kHeight, kDepth,   0.0,  0.0, 1.0,
-    -kWidth, -kHeight, kDepth,   0.0,  0.0, 1.0,
-    kWidth, -kHeight, kDepth,   0.0,  0.0,  1.0,
-    kWidth, kHeight,  kDepth,  0.0, 0.0,  1.0,
-    
-    kWidth, -kHeight, -kDepth,  0.0,  0.0, -1.0,
-    -kWidth, -kHeight, -kDepth,   0.0,  0.0, -1.0,
-    -kWidth, kHeight, -kDepth,  0.0, 0.0, -1.0,
-    kWidth, kHeight, -kDepth,  0.0, 0.0, -1.0,
-    kWidth, -kHeight, -kDepth,  0.0,  0.0, -1.0,
-    -kWidth, kHeight, -kDepth,  0.0, 0.0, -1.0
-};
 
 @implementation AAPLRenderer
 {
+    CFTimeInterval              _frameTime;
     // constant synchronization for buffering <kInFlightCommandBuffers> frames
-    dispatch_semaphore_t _inflight_semaphore;
-    id <MTLBuffer> _dynamicConstantBuffer[kInFlightCommandBuffers];
+    dispatch_semaphore_t        _inflight_semaphore;
+    id <MTLBuffer>              _dynamicConstantBuffer[kInFlightCommandBuffers];
+    id <MTLBuffer>              _shadow_pass_buffer[kInFlightCommandBuffers][N_LIGHTS];
+    id <MTLBuffer>              _sky_pass_buffer[kInFlightCommandBuffers];
+    id <MTLBuffer>              _main_pass_buffer[kInFlightCommandBuffers];
     
     // renderer global ivars
-    id <MTLDevice> _device;
-    id <MTLCommandQueue> _commandQueue;
-    id <MTLLibrary> _defaultLibrary;
-    id <MTLRenderPipelineState> _pipelineState;
-    id <MTLBuffer> _vertexBuffer;
-    id <MTLBuffer> _indexBuffer;
-    id <MTLDepthStencilState> _depthState;
+    id <MTLDevice>              _device;
+    id <MTLCommandQueue>        _commandQueue;
+    id <MTLLibrary>             _defaultLibrary;
+    id <MTLRenderPipelineState> _pipeline_main_pass;
+    id <MTLRenderPipelineState> _pipeline_shadow_pass;
+    id <MTLRenderPipelineState> _pipeline_skydome;
+    id <MTLRenderPipelineState> _pipeline_quad;
+    
+    //MTLRenderPassDescriptor*    _render_pass_desc_texture_to_screen;
+    MTLRenderPassDescriptor*    _render_pass_desc_skydome;
+    MTLRenderPassDescriptor*    _render_pass_desc_main;
+    
+    id <MTLDepthStencilState>   _depth_state_none;
+    id <MTLDepthStencilState>   _depth_state_shadow;
+    id <MTLDepthStencilState>   _depth_state_main;
+    id <MTLDepthStencilState>   _depth_state_sky;
+    id <MTLDepthStencilState>   _depth_state_ssss;
     
     // globals used in update calculation
-    float4x4 _projectionMatrix;
-    float4x4 _viewMatrix;
-    float _rotation;
+    float4x4    _projectionMatrix;
+    float4x4    _viewMatrix;
+    float       _rotation;
     
-    long _maxBufferBytesPerFrame;
-    size_t _sizeOfConstantT;
+    long        _maxBufferBytesPerFrame;
+    size_t      _sizeOfConstantT;
     
-    Model _model_head;
+    DepthStencil    _depth_stencil;
+    RenderTexture   _rt_main;
+    
+    Model       _model_head;
+    Model       _model_sphere;
+    Model       _model_quad;
+    Camera      _camera;
+    Light       _lights[N_LIGHTS];
+    
+    id <MTLTexture>     _tex_sky;
+    id <MTLTexture>     _tex_head_diffuse;
+    id <MTLTexture>     _tex_head_specularAO;
+    id <MTLTexture>     _tex_head_normal_map;
+    id <MTLTexture>     _tex_sky_irradiance_map;
+    id <MTLTexture>     _tex_beckmann;
     
     // this value will cycle from 0 to g_max_inflight_buffers whenever a display completes ensuring renderer clients
     // can synchronize between g_max_inflight_buffers count buffers, and thus avoiding a constant buffer from being overwritten between draws
@@ -135,6 +125,10 @@ static const float kCubeVertexData[] =
     // find a usable Device
     _device = view.device;
     
+    int width = view.bounds.size.width;
+    int height = view.bounds.size.height;
+    RenderContex::set_window_size(width, height);
+    
     // setup view with drawable formats
     view.depthPixelFormat   = MTLPixelFormatDepth32Float;
     view.stencilPixelFormat = MTLPixelFormatInvalid;
@@ -157,12 +151,8 @@ static const float kCubeVertexData[] =
         // cannot render anything without a valid compiled pipeline state object.
         assert(0);
     }
-    
-    MTLDepthStencilDescriptor *depthStateDesc = [[MTLDepthStencilDescriptor alloc] init];
-    depthStateDesc.depthCompareFunction = MTLCompareFunctionLess;
-    depthStateDesc.depthWriteEnabled = YES;
-    _depthState = [_device newDepthStencilStateWithDescriptor:depthStateDesc];
-    
+
+        
     // allocate a number of buffers in memory that matches the sempahore count so that
     // we always have one self contained memory buffer for each buffered frame.
     // In this case triple buffering is the optimal way to go so we cycle through 3 memory buffers
@@ -173,71 +163,312 @@ static const float kCubeVertexData[] =
         
         // write initial color values for both cubes (at each offset).
         // Note, these will get animated during update
-        constants_t *constant_buffer = (constants_t *)[_dynamicConstantBuffer[i] contents];
-        for (int j = 0; j < kNumberOfBoxes; j++)
+        // constants_t *constant_buffer = (constants_t *)[_dynamicConstantBuffer[i] contents];
+        
+        for (int j = 0; j < N_LIGHTS; j++)
         {
-            if (j%2==0) {
-                constant_buffer[j].multiplier = 1;
-                constant_buffer[j].ambient_color = kBoxAmbientColors[0];
-                constant_buffer[j].diffuse_color = kBoxDiffuseColors[0];
-            }
-            else {
-                constant_buffer[j].multiplier = -1;
-                constant_buffer[j].ambient_color = kBoxAmbientColors[1];
-                constant_buffer[j].diffuse_color = kBoxDiffuseColors[1];
-            }
+            _shadow_pass_buffer[i][j] = [_device newBufferWithLength: sizeof(constants_mvp) options:0];
+            _shadow_pass_buffer[i][j].label = [NSString stringWithFormat: @"shadow_pass_constant_buffer%i for light%i", i, j];
         }
+        
+        _sky_pass_buffer[i] = [_device newBufferWithLength: sizeof(constants_mvp) options:0];
+        _sky_pass_buffer[i].label = [NSString stringWithFormat: @"sky_pass_constant_buffer%i", i];
+        _main_pass_buffer[i] = [_device newBufferWithLength:sizeof(constant_main_pass) options:0];
+        _main_pass_buffer[i].label = [NSString stringWithFormat: @"main_pass_constant_buffer%i", i];
     }
+}
+
+void load_preset(std::string path, Camera& _camera, Light* lights)
+{
+    std::ifstream fs(path);
+    fs >> _camera;
+    _camera.build();
+    
+    for (int i = 0; i < N_LIGHTS; i++)
+    {
+        fs >> lights[i];
+    }
+    
+    fs.close();
 }
 
 - (BOOL)preparePipelineState:(AAPLView *)view
 {
+    for (int i = 0; i < N_LIGHTS; i++)
+    {
+        _lights[i].init(_device);
+    }
+    
+    load_preset(IOS_PATH("Preset", "Preset9", "txt"), _camera, _lights);
+    
+    _rt_main.init(_device, MTLPixelFormatRGBA8Unorm_sRGB);
+    _depth_stencil.init(_device);
+    
     // load resources
-    _model_head.init(IOS_PATH("head", "head_optimized", "obj"), true, true, true, false);
+    //*******************************************************************
+    _model_head.init(_device, IOS_PATH("head", "head_optimized", "obj"), true, true, true, false);
+    _model_sphere.init(_device, IOS_PATH("Models", "Sphere", "obj"), false, false, false, false);
+    _model_quad.init(_device, IOS_PATH("Models", "Quad", "obj"), false, false, false, false);
     
-    // get the fragment function from the library
-    id <MTLFunction> fragmentProgram = [_defaultLibrary newFunctionWithName:@"lighting_fragment"];
-    if(!fragmentProgram)
-        NSLog(@">> ERROR: Couldn't load fragment function from default library");
+    // Load the texture
+    _tex_head_diffuse       = TextureLoader::CreateTexture(_device,         IOS_PATH("head", "DiffuseMap_R8G8B8A8_1024_mipmaps", "dds"), MTLPixelFormatRGBA8Unorm_sRGB);
+    _tex_head_specularAO    = TextureLoader::CreateTexture(_device,         IOS_PATH("head", "SpecularAOMap_RGBA8UNorm", "dds"),        MTLPixelFormatRGBA8Unorm);
+    _tex_head_normal_map    = TextureLoader::CreateTexture(_device,         IOS_PATH("head", "NormalMap_RG16f_1024_mipmaps", "dds"),    MTLPixelFormatRG16Float);
+    _tex_sky                = TextureLoader::CreateTextureCubemap(_device,  IOS_PATH("StPeters", "DiffuseMap", "dds"),                  MTLPixelFormatRGBA16Float);
+    _tex_sky_irradiance_map = TextureLoader::CreateTextureCubemap(_device,  IOS_PATH("StPeters", "IrradianceMap", "dds"),               MTLPixelFormatRGBA32Float);
+    _tex_beckmann           = TextureLoader::CreateTexture(_device,         IOS_PATH("Texture", "BeckmannMap", "dds"),                  MTLPixelFormatRG8Unorm);
     
-    // get the vertex function from the library
-    id <MTLFunction> vertexProgram = [_defaultLibrary newFunctionWithName:@"lighting_vertex"];
-    if(!vertexProgram)
-        NSLog(@">> ERROR: Couldn't load vertex function from default library");
     
-    _indexBuffer = [_device newBufferWithBytes:reinterpret_cast<const void*>(_model_head.Triangles().data())
-                                        length:_model_head.IndexCount() * sizeof(_model_head.Triangles()[0])
-                                       options:MTLResourceOptionCPUCacheModeDefault];
+    // Shader loading
+    //*******************************************************************
+    auto shadow_vert    = _newFunctionFromLibrary(_defaultLibrary, @"shadow_pass_vert");
+    //auto shadow_frag = _newFunctionFromLibrary(_defaultLibrary, @"shadow_pass_frag");
     
-    // setup the vertex buffers
-    _vertexBuffer = [_device newBufferWithBytes:reinterpret_cast<const void*>(_model_head.Vertices().data())
-                                         length:_model_head.VertexCount() * sizeof(_model_head.Vertices()[0])
-                                        options:MTLResourceOptionCPUCacheModeDefault];
-    _vertexBuffer.label = @"Vertices";
+    auto main_vert      = _newFunctionFromLibrary(_defaultLibrary, @"main_pass_vert");
+    auto main_frag      = _newFunctionFromLibrary(_defaultLibrary, @"main_pass_frag");
     
-    // create a pipeline state descriptor which can be used to create a compiled pipeline state object
-    MTLRenderPipelineDescriptor *pipelineStateDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    auto skydome_vert   = _newFunctionFromLibrary(_defaultLibrary, @"skydome_pass_vert");
+    auto skydome_frag   = _newFunctionFromLibrary(_defaultLibrary, @"skydome_pass_frag");
     
-    pipelineStateDescriptor.label                           = @"MyPipeline";
-    pipelineStateDescriptor.sampleCount                     = view.sampleCount;
-    pipelineStateDescriptor.vertexFunction                  = vertexProgram;
-    pipelineStateDescriptor.fragmentFunction                = fragmentProgram;
-    pipelineStateDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-    pipelineStateDescriptor.depthAttachmentPixelFormat      = view.depthPixelFormat;
+    auto quad_vert      = _newFunctionFromLibrary(_defaultLibrary, @"quad_vert");
+    auto quad_frag      = _newFunctionFromLibrary(_defaultLibrary, @"quad_frag");
     
-    // create a compiled pipeline state object. Shader functions (from the render pipeline descriptor)
-    // are compiled when this is created unlessed they are obtained from the device's cache
-    NSError *error = nil;
-    _pipelineState = [_device newRenderPipelineStateWithDescriptor:pipelineStateDescriptor error:&error];
-    if(!_pipelineState) {
-        NSLog(@">> ERROR: Failed Aquiring pipeline state: %@", error);
-        return NO;
+    // Pipeline setup
+    //*********************************************************************
+    {
+        MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
+        NSError *err = nil;
+        desc.label = @"Shdow Pass";
+        desc.vertexFunction = shadow_vert;
+        desc.fragmentFunction = nil;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        _pipeline_shadow_pass = [_device newRenderPipelineStateWithDescriptor:desc error: &err];
+        CheckPipelineError(_pipeline_shadow_pass, err);
+        
+        desc.label = @"Main Pass";
+        desc.vertexFunction = main_vert;
+        desc.fragmentFunction = main_frag;
+        desc.colorAttachments[0].pixelFormat = _rt_main.pixel_format();
+        desc.depthAttachmentPixelFormat = _depth_stencil.pixel_format();
+        _pipeline_main_pass = [_device newRenderPipelineStateWithDescriptor: desc error:&err];
+        CheckPipelineError(_pipeline_main_pass, err);
+        
+        desc.label = @"Sky Pass";
+        desc.vertexFunction = skydome_vert;
+        desc.fragmentFunction = skydome_frag;
+        desc.colorAttachments[0].pixelFormat = _rt_main.pixel_format();
+        desc.depthAttachmentPixelFormat = _depth_stencil.pixel_format();
+        _pipeline_skydome = [_device newRenderPipelineStateWithDescriptor: desc error: & err];
+        CheckPipelineError(_pipeline_skydome, err);
+        
+        desc.label = @"Quad Pass";
+        desc.vertexFunction = quad_vert;
+        desc.fragmentFunction = quad_frag;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        desc.depthAttachmentPixelFormat = view.depthPixelFormat;
+        _pipeline_quad= [_device newRenderPipelineStateWithDescriptor: desc error: & err];
+        CheckPipelineError(_pipeline_quad, err);
+    }
+    
+    //Setup depth and stencil state objects
+    //*********************************************************************
+    {
+        MTLDepthStencilDescriptor *desc = [[MTLDepthStencilDescriptor alloc] init];
+        //MTLStencilDescriptor *stencil_desc = [[MTLStencilDescriptor alloc] init];
+        
+        desc.depthWriteEnabled = NO;
+        desc.depthCompareFunction = MTLCompareFunctionAlways;
+        _depth_state_none = [_device newDepthStencilStateWithDescriptor: desc];
+        
+        desc.depthWriteEnabled = YES;
+        desc.depthCompareFunction = MTLCompareFunctionLess;
+        _depth_state_shadow = [_device newDepthStencilStateWithDescriptor: desc];
+        
+        desc.depthWriteEnabled = YES;
+        desc.depthCompareFunction = MTLCompareFunctionLess;
+//        stencil_desc.stencilCompareFunction = MTLCompareFunctionAlways;
+//        stencil_desc.stencilFailureOperation = MTLStencilOperationKeep;
+//        stencil_desc.depthFailureOperation = MTLStencilOperationKeep;
+//        stencil_desc.depthStencilPassOperation = MTLStencilOperationReplace;
+//        stencil_desc.readMask = 0xFF;
+//        stencil_desc.writeMask = 0xFF;
+//        desc.frontFaceStencil = stencil_desc;
+//        desc.backFaceStencil = stencil_desc;
+        _depth_state_main = [_device newDepthStencilStateWithDescriptor: desc];
+        
+        desc.depthWriteEnabled = YES;
+        desc.depthCompareFunction = MTLCompareFunctionLess;
+        _depth_state_sky = [_device newDepthStencilStateWithDescriptor: desc];
+        
+    }
+    
+    //Render Pass Desc
+    //*********************************************************************
+    {
+        _render_pass_desc_main = [MTLRenderPassDescriptor renderPassDescriptor];
+        auto color_attachment_0 = _render_pass_desc_main.colorAttachments[0];
+        color_attachment_0.texture = _rt_main.texture();
+        color_attachment_0.loadAction = MTLLoadActionClear;
+        color_attachment_0.storeAction = MTLStoreActionStore;
+        color_attachment_0.clearColor = MTLClearColorMake(1, 0, 0, 1);
+        auto depth_attachment = _render_pass_desc_main.depthAttachment;
+        depth_attachment.texture = _depth_stencil.get_depth_stencil_texture();
+        depth_attachment.loadAction = MTLLoadActionClear;
+        depth_attachment.storeAction = MTLStoreActionStore;
+        depth_attachment.clearDepth = 1.0;
+    }
+    {
+        _render_pass_desc_skydome = [MTLRenderPassDescriptor renderPassDescriptor];
+        auto color_attachment_0 = _render_pass_desc_skydome.colorAttachments[0];
+        color_attachment_0.texture = _rt_main.texture();
+        color_attachment_0.loadAction = MTLLoadActionLoad;
+        color_attachment_0.storeAction = MTLStoreActionStore;
+        color_attachment_0.clearColor = MTLClearColorMake(1, 0, 0, 1);
+        auto depth_attachment = _render_pass_desc_skydome.depthAttachment;
+        depth_attachment.texture = _depth_stencil.get_depth_stencil_texture();
+        depth_attachment.loadAction = MTLLoadActionLoad;
+        depth_attachment.storeAction = MTLStoreActionStore;
+        //depth_attachment.clearDepth = 1.0;
     }
     
     return YES;
 }
 
 #pragma mark Render
+- (void)ShdowPass: (id<MTLCommandBuffer>)commandBuffer
+{
+    RenderContex::model_mat = glm::scale(mat4(1.0f), vec3(0.7f, 0.7f, 0.7f)) * glm::translate(mat4(1.0f), vec3(0, 0.2f, 0.425f));
+    for (int i = 0; i < N_LIGHTS; i++)
+    {
+        auto encoder = [commandBuffer renderCommandEncoderWithDescriptor: _lights[i].shadowMap.renderPassDescriptor()];
+        [encoder pushDebugGroup:[NSString stringWithFormat: @"Shdow Pass %d", i]];
+        encoder.label = [NSString stringWithFormat: @"ShadowMap%d", i];
+        
+        // setup encoder state
+        [encoder setRenderPipelineState: _pipeline_shadow_pass];
+        [encoder setDepthStencilState: _depth_state_shadow];
+        [encoder setCullMode: MTLCullModeFront];
+        [encoder setDepthBias:0.01 slopeScale: 1.0f clamp: 0.01];
+        
+        RenderContex::camera = &_lights[i].camera;
+        auto uniform_buffer = (constants_mvp*)[_shadow_pass_buffer[_constantDataBufferIndex][i] contents];
+        uniform_buffer->MVP = RenderContex::get_mvp_mat();
+        [encoder setVertexBuffer:_shadow_pass_buffer[_constantDataBufferIndex][i] offset:0 atIndex:0 ];
+        
+        _model_head.render(encoder, true);
+        
+        [encoder popDebugGroup];
+        [encoder endEncoding];
+    }
+}
+
+- (void)MainPass: (id<MTLCommandBuffer>)commandBuffer
+{
+    {
+        auto encoder = [commandBuffer renderCommandEncoderWithDescriptor: _render_pass_desc_main];
+        [encoder pushDebugGroup:@"MainPass"];
+        encoder.label = @"main pass";
+        [encoder setDepthStencilState: _depth_state_main];
+        [encoder setRenderPipelineState: _pipeline_main_pass];
+        [encoder setCullMode: MTLCullModeFront];
+        
+        auto constant_buffer = (constant_main_pass*)[ _main_pass_buffer[_constantDataBufferIndex] contents];
+        RenderContex::camera = &_camera;
+        RenderContex::model_mat = glm::scale(glm::mat4(1.0f), glm::vec3(2.f));
+        constant_buffer->MVP = RenderContex::get_mvp_mat();
+        constant_buffer->Model = RenderContex::model_mat;
+        constant_buffer->ModelInverseTranspose = (mat3)RenderContex::get_model_inverse_transpose();
+        constant_buffer->camera_position = _camera.getEyePosition();
+        [encoder setVertexBuffer: _dynamicConstantBuffer[_constantDataBufferIndex] offset:0 atIndex:0];
+        [encoder setFragmentTexture: _tex_head_diffuse atIndex:0];
+        [encoder setFragmentTexture: _tex_head_specularAO atIndex:1];
+        [encoder setFragmentTexture: _tex_head_normal_map atIndex:2];
+        [encoder setFragmentTexture: _tex_beckmann atIndex:3];
+        [encoder setFragmentTexture: _tex_sky_irradiance_map atIndex:4];
+
+        _model_head.render(encoder);
+        
+        [encoder popDebugGroup];
+        [encoder endEncoding];
+    }
+    
+    {
+        auto encoder = [commandBuffer renderCommandEncoderWithDescriptor: _render_pass_desc_skydome];
+        [encoder pushDebugGroup:@"SkyPass"];
+        encoder.label = @"sky pass";
+        [encoder setDepthStencilState: _depth_state_sky];
+        [encoder setRenderPipelineState: _pipeline_skydome];
+        [encoder setCullMode: MTLCullModeBack];
+        
+        auto constant_buffer = (constants_mvp*)[_sky_pass_buffer[_constantDataBufferIndex] contents];
+        RenderContex::camera = &_camera;
+        RenderContex::model_mat = glm::scale(glm::mat4(1.0f), glm::vec3(2.f));
+        constant_buffer->MVP = RenderContex::get_mvp_mat();
+        [encoder setVertexBuffer:_sky_pass_buffer[_constantDataBufferIndex] offset:0 atIndex:0];
+        [encoder setFragmentTexture: _tex_sky atIndex:0];
+        
+        _model_sphere.render(encoder);
+    
+        [encoder popDebugGroup];
+        [encoder endEncoding];
+    }
+    
+//    auto encoder = [commandBuffer renderCommandEncoderWithDescriptor: _render_pass_desc_main];
+//    [encoder pushDebugGroup:@"MainPass"];
+//    encoder.label = @"main pass";
+//    [encoder setRenderPipelineState: _pipeline_main_pass];
+//    [encoder setDepthStencilState: _depth_state_main];
+//    //auto constant_buffer = (constants_mvp*)[ _dynamicConstantBuffer[_constantDataBufferIndex] contents];
+//    //RenderContex::camera = &_camera;
+//    //RenderContex::model_mat = glm::scale(glm::mat4(1.0f), glm::vec3(2.f));
+//    //constant_buffer->MVP = RenderContex::get_mvp_mat();
+//    [encoder setVertexBuffer: _dynamicConstantBuffer[_constantDataBufferIndex] offset:0 atIndex:0];
+//    //[encoder setFragmentTexture: _tex_sky atIndex:0];
+//
+//    _model_head.render(encoder);
+//
+//    [encoder popDebugGroup];
+//    
+//    [encoder pushDebugGroup:@"SkyPass"];
+//    //encoder.label = @"sky pass";
+//    [encoder setRenderPipelineState: _pipeline_skydome];
+//    [encoder setDepthStencilState: _depth_state_sky];
+//    auto constant_buffer = (constants_mvp*)[_sky_pass_buffer[_constantDataBufferIndex] contents];
+//    RenderContex::camera = &_camera;
+//    RenderContex::model_mat = glm::scale(glm::mat4(1.0f), glm::vec3(2.f));
+//    constant_buffer->MVP = RenderContex::get_mvp_mat();
+//    [encoder setVertexBuffer:_sky_pass_buffer[_constantDataBufferIndex] offset:0 atIndex:0];
+//    [encoder setFragmentTexture: _tex_sky atIndex:0];
+//    
+//    _model_sphere.render(encoder);
+//    
+//    
+//    [encoder popDebugGroup];
+//    [encoder endEncoding];
+}
+
+- (void)SkyPass: (id<MTLCommandBuffer>) commandBuffer
+{
+    
+}
+
+- (void)DrawTextureToScreen: (id<MTLTexture>) texture commandBuffer: (id<MTLCommandBuffer>) commandBuffer view:(AAPLView*) view
+{
+    auto encoder = [commandBuffer renderCommandEncoderWithDescriptor: view.renderPassDescriptor];
+    [encoder pushDebugGroup:@"texture2ScreenPass"];
+    encoder.label = @"texture pass";
+    
+    // setup encoder state
+    [encoder setRenderPipelineState: _pipeline_quad];
+    [encoder setDepthStencilState: _depth_state_none];
+    [encoder setCullMode: MTLCullModeNone];
+    [encoder setDepthBias:0.01 slopeScale: 1.0f clamp: 0.01];
+    [encoder setFragmentTexture: texture atIndex: 0];
+    _model_quad.render(encoder, true);
+    
+    [encoder popDebugGroup];
+    [encoder endEncoding];
+}
 
 - (void)render:(AAPLView *)view
 {
@@ -252,31 +483,12 @@ static const float kCubeVertexData[] =
     // create a new command buffer for each renderpass to the current drawable
     id <MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
     
-    // create a render command encoder so we can render into something
-    MTLRenderPassDescriptor *renderPassDescriptor = view.renderPassDescriptor;
-    if (renderPassDescriptor)
-    {
-        id <MTLRenderCommandEncoder> renderEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
-        [renderEncoder pushDebugGroup:@"Boxes"];
-        [renderEncoder setDepthStencilState:_depthState];
-        [renderEncoder setRenderPipelineState:_pipelineState];
-        [renderEncoder setVertexBuffer:_vertexBuffer offset:0 atIndex:0 ];
-        
-        for (int i = 0; i < kNumberOfBoxes; i++) {
-            //  set constant buffer for each box
-            [renderEncoder setVertexBuffer:_dynamicConstantBuffer[_constantDataBufferIndex] offset:i*_sizeOfConstantT atIndex:1 ];
-            
-            // tell the render context we want to draw our primitives
-            //[renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:36];
-            [renderEncoder drawIndexedPrimitives: MTLPrimitiveTypeTriangle indexCount:_model_head.IndexCount() indexType:MTLIndexTypeUInt32 indexBuffer:_indexBuffer indexBufferOffset:0];
-        }
-        
-        [renderEncoder endEncoding];
-        [renderEncoder popDebugGroup];
-        
-        // schedule a present once rendering to the framebuffer is complete
-        [commandBuffer presentDrawable:view.currentDrawable];
-    }
+    [self ShdowPass: commandBuffer];
+    [self MainPass: commandBuffer];
+    
+    [self DrawTextureToScreen: _rt_main.texture() commandBuffer: commandBuffer view: view];
+    
+    [commandBuffer presentDrawable: view.currentDrawable];
     
     // call the view's completion handler which is required by the view since it will signal its semaphore and set up the next buffer
     __block dispatch_semaphore_t block_sema = _inflight_semaphore;
@@ -300,9 +512,8 @@ static const float kCubeVertexData[] =
 - (void)reshape:(AAPLView *)view
 {
     // when reshape is called, update the view and projection matricies since this means the view orientation or size changed
-    float aspect = fabsf(view.bounds.size.width / view.bounds.size.height);
-    _projectionMatrix = perspective_fov(kFOVY, aspect, 0.1f, 100.0f);
-    _viewMatrix = lookAt(kEye, kCenter, kUp);
+    float aspect = fabsf(float(view.bounds.size.width) / float(view.bounds.size.height));
+    _camera.setProjection(CAMERA_FOV * PI / 180.0f, aspect, 0.1f, 100.0f);
 }
 
 #pragma mark Update
@@ -310,38 +521,26 @@ static const float kCubeVertexData[] =
 // called every frame
 - (void)updateConstantBuffer
 {
-    float4x4 baseModelViewMatrix = translate(0.0f, 0.0f, 5.0f) * rotate(_rotation, 1.0f, 1.0f, 1.0f);
+    glm::mat4 model = glm::scale(mat4(1.0f), vec3(0.7f, 0.7f, 0.7f)) * glm::translate(mat4(1.0f), vec3(0, 0.2f, 0.425f));
+    mat4 modelView = _camera.getViewMatrix() * model;
+    mat4 MVP = _camera.getProjectionMatrix() * modelView;
+    
+    float4x4 baseModelViewMatrix = translate(0.0f, 0.2f, 0.425f) * scale(0.7f, 0.7f, 0.7f);
     baseModelViewMatrix = _viewMatrix * baseModelViewMatrix;
     
     constants_t *constant_buffer = (constants_t *)[_dynamicConstantBuffer[_constantDataBufferIndex] contents];
     for (int i = 0; i < kNumberOfBoxes; i++)
     {
-        // calculate the Model view projection matrix of each box
-        // for each box, if its odd, create a negative multiplier to offset boxes in space
-        int multiplier = ((i % 2 == 0)?1:-1);
-        simd::float4x4 modelViewMatrix = AAPL::translate(0.0f, 0.0f, multiplier*1.5f) * AAPL::rotate(_rotation, 1.0f, 1.0f, 1.0f);
-        modelViewMatrix = baseModelViewMatrix * modelViewMatrix;
-        
-        constant_buffer[i].normal_matrix = inverse(transpose(modelViewMatrix));
-        constant_buffer[i].modelview_projection_matrix = _projectionMatrix * modelViewMatrix;
-        
-        // change the color each frame
-        // reverse direction if we've reached a boundary
-        if (constant_buffer[i].ambient_color.y >= 0.8) {
-            constant_buffer[i].multiplier = -1;
-            constant_buffer[i].ambient_color.y = 0.79;
-        } else if (constant_buffer[i].ambient_color.y <= 0.2) {
-            constant_buffer[i].multiplier = 1;
-            constant_buffer[i].ambient_color.y = 0.21;
-        } else
-            constant_buffer[i].ambient_color.y += constant_buffer[i].multiplier * 0.01*i;
+        constant_buffer[i].normal_matrix = inverse(transpose(modelView));
+        constant_buffer[i].MVP = MVP;
     }
 }
 
 // just use this to update app globals
 - (void)update:(AAPLViewController *)controller
 {
-    _rotation += controller.timeSinceLastDraw * 50.0f;
+    //_rotation += controller.timeSinceLastDraw * 50.0f;
+    _frameTime += controller.timeSinceLastDraw;
 }
 
 - (void)viewController:(AAPLViewController *)controller willPause:(BOOL)pause
