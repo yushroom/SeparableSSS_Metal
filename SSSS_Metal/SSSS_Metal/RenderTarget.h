@@ -110,7 +110,7 @@ public:
 };
 
 
-class ShadowMap : DepthStencil
+class ShadowMap : public DepthStencil
 {
 protected:
     DISALLOW_COPY_AND_ASSIGN(ShadowMap)
@@ -145,6 +145,19 @@ public:
         attachment.loadAction = MTLLoadActionClear;
         attachment.storeAction = MTLStoreActionStore;
         attachment.clearDepth = 1.0;
+    }
+    
+    static glm::mat4 getViewProjectionTextureMatrix(glm::mat4 const & view, glm::mat4 const & projection)
+    {
+        static mat4 biasMatrix(
+                               0.5, 0.0, 0.0, 0.0,
+                               0.0, 0.5, 0.0, 0.0,
+                               0.0, 0.0, 0.5, 0.0,
+                               0.5, 0.5, 0.5, 1.0
+                               );
+        //biasMatrix = mat4(1.0f);
+        return biasMatrix * projection * view;
+        //return projection * view;
     }
 };
 

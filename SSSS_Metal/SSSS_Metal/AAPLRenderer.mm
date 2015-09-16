@@ -173,6 +173,9 @@ static const vec4 kBoxDiffuseColors[2] = {
         
         _sky_pass_buffer[i] = [_device newBufferWithLength: sizeof(constants_mvp) options:0];
         _sky_pass_buffer[i].label = [NSString stringWithFormat: @"sky_pass_constant_buffer%i", i];
+        //auto s = sizeof(constant_main_pass);
+        //auto s2 = sizeof(glm::vec3);
+        //auto s3 = sizeof(glm::mat3);
         _main_pass_buffer[i] = [_device newBufferWithLength:sizeof(constant_main_pass) options:0];
         _main_pass_buffer[i].label = [NSString stringWithFormat: @"main_pass_constant_buffer%i", i];
     }
@@ -201,7 +204,7 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
     
     load_preset(IOS_PATH("Preset", "Preset9", "txt"), _camera, _lights);
     
-    _rt_main.init(_device, MTLPixelFormatRGBA8Unorm_sRGB);
+    _rt_main.init(_device, MTLPixelFormatRGBA8Unorm);
     _depth_stencil.init(_device);
     
     // load resources
@@ -352,10 +355,10 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         
         RenderContex::camera = &_lights[i].camera;
         auto uniform_buffer = (constants_mvp*)[_shadow_pass_buffer[_constantDataBufferIndex][i] contents];
-        uniform_buffer->MVP = RenderContex::get_mvp_mat();
+        uniform_buffer->MVP = to_simd_type(RenderContex::get_mvp_mat());
         [encoder setVertexBuffer:_shadow_pass_buffer[_constantDataBufferIndex][i] offset:0 atIndex:0 ];
         
-        _model_head.render(encoder, true);
+        _model_head.render(encoder, true, true, true);
         
         [encoder popDebugGroup];
         [encoder endEncoding];
@@ -365,6 +368,23 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
 - (void)MainPass: (id<MTLCommandBuffer>)commandBuffer
 {
     {
+        bool separate_speculars = false;
+        bool enable_ssss = true;
+        bool enable_sss_translucency = true;
+        float sss_width = 0.012f;
+        vec3 sss_strength = vec3(0.48f, 0.41f, 0.28f);
+        vec3 sss_falloff = vec3(1.0f, 0.37f, 0.3f);
+        float translucency = 0.88f;	// TODO
+        
+        double speed = 1;
+        float specularIntensity = 1.88f;
+        float specularRoughness = 0.3f;
+        float specularFresnel = 0.82f;
+        float bumpiness = 0.9f;
+        float ambient = 0.80f; // 0.61f
+        
+        float falloff_width = 0.1f;
+        
         auto encoder = [commandBuffer renderCommandEncoderWithDescriptor: _render_pass_desc_main];
         [encoder pushDebugGroup:@"MainPass"];
         encoder.label = @"main pass";
@@ -374,17 +394,50 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         
         auto constant_buffer = (constant_main_pass*)[ _main_pass_buffer[_constantDataBufferIndex] contents];
         RenderContex::camera = &_camera;
-        RenderContex::model_mat = glm::scale(glm::mat4(1.0f), glm::vec3(2.f));
-        constant_buffer->MVP = RenderContex::get_mvp_mat();
-        constant_buffer->Model = RenderContex::model_mat;
-        constant_buffer->ModelInverseTranspose = (mat3)RenderContex::get_model_inverse_transpose();
-        constant_buffer->camera_position = _camera.getEyePosition();
-        [encoder setVertexBuffer: _dynamicConstantBuffer[_constantDataBufferIndex] offset:0 atIndex:0];
+        RenderContex::model_mat = glm::scale(mat4(1.0f), vec3(0.7f, 0.7f, 0.7f)) * glm::translate(mat4(1.0f), vec3(0, 0.2f, 0.425f));;
+        constant_buffer->MVP = to_simd_type(RenderContex::get_mvp_mat());
+        constant_buffer->Model = to_simd_type(RenderContex::model_mat);
+        constant_buffer->ModelInverseTranspose = to_simd_type(RenderContex::get_model_inverse_transpose());
+        constant_buffer->camera_position = to_simd_type(vec4(_camera.getEyePosition(), 1.0));
+        
+        constant_buffer->bumpiness = bumpiness;
+        constant_buffer->specularIntensity = specularIntensity;
+        constant_buffer->specularRoughness = specularRoughness;
+        constant_buffer->specularFresnel = specularFresnel;
+        constant_buffer->translucency = translucency;
+        constant_buffer->sssWidth = sss_width;
+        constant_buffer->ambient = ambient;
+        constant_buffer->sssEnabled = enable_ssss;
+        constant_buffer->sssTranslucencyEnabled = enable_sss_translucency;
+        constant_buffer->separate_speculars = separate_speculars;
+        
+        for (int i = 0; i < N_LIGHTS; i++)
+        {
+            auto& l = _lights[i];
+            auto& lc = l.camera;
+            auto& pos = lc.getEyePosition();
+            constant_buffer->lights[i].position = to_simd_type(pos);
+            constant_buffer->lights[i].direction = to_simd_type(lc.getLookAtPosition() - pos);
+            constant_buffer->lights[i].falloffStart = cos(0.5f * l.fov);
+            constant_buffer->lights[i].falloffWidth = falloff_width;
+            constant_buffer->lights[i].color = to_simd_type(l.color);
+            constant_buffer->lights[i].attenuation = l.attenuation;
+            constant_buffer->lights[i].farPlane = l.farPlane;
+            constant_buffer->lights[i].bias = l.bias;
+            constant_buffer->lights[i].viewProjection = to_simd_type(ShadowMap::getViewProjectionTextureMatrix(lc.getViewMatrix(), lc.getProjectionMatrix()));
+        }
+
+        [encoder setVertexBuffer: _main_pass_buffer[_constantDataBufferIndex] offset:0 atIndex:0];
+        [encoder setFragmentBuffer: _main_pass_buffer[_constantDataBufferIndex] offset:0 atIndex:0];
         [encoder setFragmentTexture: _tex_head_diffuse atIndex:0];
         [encoder setFragmentTexture: _tex_head_specularAO atIndex:1];
         [encoder setFragmentTexture: _tex_head_normal_map atIndex:2];
         [encoder setFragmentTexture: _tex_beckmann atIndex:3];
         [encoder setFragmentTexture: _tex_sky_irradiance_map atIndex:4];
+        for (int i = 0; i < N_LIGHTS; i++)
+        {
+            [encoder setFragmentTexture: _lights[i].shadowMap.get_depth_stencil_texture() atIndex:5+i];
+        }
 
         _model_head.render(encoder);
         
@@ -403,7 +456,7 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         auto constant_buffer = (constants_mvp*)[_sky_pass_buffer[_constantDataBufferIndex] contents];
         RenderContex::camera = &_camera;
         RenderContex::model_mat = glm::scale(glm::mat4(1.0f), glm::vec3(2.f));
-        constant_buffer->MVP = RenderContex::get_mvp_mat();
+        constant_buffer->MVP = to_simd_type( RenderContex::get_mvp_mat() );
         [encoder setVertexBuffer:_sky_pass_buffer[_constantDataBufferIndex] offset:0 atIndex:0];
         [encoder setFragmentTexture: _tex_sky atIndex:0];
         
@@ -412,39 +465,6 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         [encoder popDebugGroup];
         [encoder endEncoding];
     }
-    
-//    auto encoder = [commandBuffer renderCommandEncoderWithDescriptor: _render_pass_desc_main];
-//    [encoder pushDebugGroup:@"MainPass"];
-//    encoder.label = @"main pass";
-//    [encoder setRenderPipelineState: _pipeline_main_pass];
-//    [encoder setDepthStencilState: _depth_state_main];
-//    //auto constant_buffer = (constants_mvp*)[ _dynamicConstantBuffer[_constantDataBufferIndex] contents];
-//    //RenderContex::camera = &_camera;
-//    //RenderContex::model_mat = glm::scale(glm::mat4(1.0f), glm::vec3(2.f));
-//    //constant_buffer->MVP = RenderContex::get_mvp_mat();
-//    [encoder setVertexBuffer: _dynamicConstantBuffer[_constantDataBufferIndex] offset:0 atIndex:0];
-//    //[encoder setFragmentTexture: _tex_sky atIndex:0];
-//
-//    _model_head.render(encoder);
-//
-//    [encoder popDebugGroup];
-//    
-//    [encoder pushDebugGroup:@"SkyPass"];
-//    //encoder.label = @"sky pass";
-//    [encoder setRenderPipelineState: _pipeline_skydome];
-//    [encoder setDepthStencilState: _depth_state_sky];
-//    auto constant_buffer = (constants_mvp*)[_sky_pass_buffer[_constantDataBufferIndex] contents];
-//    RenderContex::camera = &_camera;
-//    RenderContex::model_mat = glm::scale(glm::mat4(1.0f), glm::vec3(2.f));
-//    constant_buffer->MVP = RenderContex::get_mvp_mat();
-//    [encoder setVertexBuffer:_sky_pass_buffer[_constantDataBufferIndex] offset:0 atIndex:0];
-//    [encoder setFragmentTexture: _tex_sky atIndex:0];
-//    
-//    _model_sphere.render(encoder);
-//    
-//    
-//    [encoder popDebugGroup];
-//    [encoder endEncoding];
 }
 
 - (void)SkyPass: (id<MTLCommandBuffer>) commandBuffer
@@ -531,8 +551,8 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
     constants_t *constant_buffer = (constants_t *)[_dynamicConstantBuffer[_constantDataBufferIndex] contents];
     for (int i = 0; i < kNumberOfBoxes; i++)
     {
-        constant_buffer[i].normal_matrix = inverse(transpose(modelView));
-        constant_buffer[i].MVP = MVP;
+        constant_buffer[i].normal_matrix = to_simd_type(inverse(transpose(modelView)));
+        constant_buffer[i].MVP = to_simd_type(MVP);
     }
 }
 

@@ -12,6 +12,8 @@
 #include <Metal/Metal.h>
 #include <string>
 #include <CoreFoundation/CoreFoundation.h>
+#include <glm/glm.hpp>
+#include <simd/simd.h>
 
 #import <UIKit/UIKit.h>
 
@@ -64,86 +66,42 @@ static id<MTLFunction> _newFunctionFromLibrary(id<MTLLibrary> library, NSString 
 }
 
 
+// T: simd type
+// U: glm type
+template<typename T, typename U>
+static T to_simd_type(const U& u)
+{
+    return reinterpret_cast<T>(u);
+}
 
+static simd::float3x3 to_simd_type(const glm::mat3& m)
+{
+    return simd::float3x3{
+        simd::float3{m[0][0], m[0][1], m[0][2]},
+        simd::float3{m[1][0], m[1][1], m[1][2]},
+        simd::float3{m[2][0], m[2][1], m[2][2]} };
+    //return simd::float3x3{ to_simd_type(m[0]), to_simd_type(m[1]), to_simd_type(m[2]) };
+}
+static simd::float4x4 to_simd_type(const glm::mat4& m)
+{
+    return simd::float4x4{
+        simd::float4{m[0][0], m[0][1], m[0][2], m[0][3] },
+        simd::float4{m[1][0], m[1][1], m[1][2], m[1][3] },
+        simd::float4{m[2][0], m[2][1], m[2][2], m[2][3] },
+        simd::float4{m[3][0], m[3][1], m[3][2], m[3][3] } };
+}
+static simd::float2 to_simd_type(const glm::vec2& v)
+{
+    return simd::float2{v.x, v.y};
+}
+static simd::float3 to_simd_type(const glm::vec3& v)
+{
+    return simd::float3{v.x, v.y, v.z};
+}
+static simd::float4 to_simd_type(const glm::vec4& v)
+{
+    return simd::float4{v.x, v.y, v.z, v.w};
+}
 
-
-///////////////////////////////////////////////////////////
-//// Texture loading and conversion
-//static void RGB8ImageToRGBA8(ImageInfo *tex_info)
-//{
-//    
-//    assert(tex_info != NULL);
-//    assert(tex_info->bitsPerPixel == 24);
-//    
-//    NSUInteger stride = tex_info->width * 4;
-//    void *newPixels = malloc(stride * tex_info->height);
-//    
-//    uint32_t *dstPixel = static_cast<uint32_t *>(newPixels);
-//    uint8_t r, g, b, a;
-//    a = 255;
-//    
-//    NSUInteger sourceStride = tex_info->width * tex_info->bitsPerPixel / 8;
-//    
-//    for (int j = 0; j < tex_info->height; j++)
-//    {
-//        for (int i = 0; i < sourceStride; i += 3)
-//        {
-//            uint8_t *srcPixel = (uint8_t *)(tex_info->bitmapData) + i + (sourceStride * j);
-//            r = *srcPixel;
-//            srcPixel++;
-//            g = *srcPixel;
-//            srcPixel++;
-//            b = *srcPixel;
-//            srcPixel++;
-//            
-//            *dstPixel = (static_cast<uint32_t>(a) << 24 | static_cast<uint32_t>(b) << 16 | static_cast<uint32_t>(g) << 8 | static_cast<uint32_t>(r));
-//            dstPixel++;
-//            
-//        }
-//    }
-//    
-//    free(tex_info->bitmapData);
-//    tex_info->bitmapData = static_cast<unsigned char *>(newPixels);
-//    tex_info->hasAlpha = true;
-//    tex_info->bitsPerPixel = 32;
-//}
-//
-//static void CreateImageInfo(const char *name, ImageInfo &tex_info)
-//{
-//    tex_info.bitmapData = NULL;
-//    
-//    UIImage* baseImage = [UIImage imageWithContentsOfFile: [NSString stringWithUTF8String: name]];
-//    CGImageRef image = baseImage.CGImage;
-//    
-//    if (!image)
-//    {
-//        return;
-//    }
-//    
-//    tex_info.width = (uint)CGImageGetWidth(image);
-//    tex_info.height = (uint)CGImageGetHeight(image);
-//    tex_info.bitsPerPixel = (uint)CGImageGetBitsPerPixel(image);
-//    tex_info.hasAlpha = CGImageGetAlphaInfo(image) != kCGImageAlphaNone;
-//    uint sizeInBytes = tex_info.width * tex_info.height * tex_info.bitsPerPixel / 8;
-//    uint bytesPerRow = tex_info.width * tex_info.bitsPerPixel / 8;
-//    
-//    tex_info.bitmapData = malloc(sizeInBytes);
-//    CGContextRef context = CGBitmapContextCreate(tex_info.bitmapData, tex_info.width, tex_info.height, 8, bytesPerRow, CGImageGetColorSpace(image), CGImageGetBitmapInfo(image));
-//    
-//    CGContextDrawImage(context, CGRectMake(0, 0, tex_info.width, tex_info.height), image);
-//    
-//    CGContextRelease(context);
-//    
-//}
-
-// Texture Loader
-//***************************************************************
-//@interface TextureLoader : NSObject
-//
-//+ (id <MTLTexture>)loadCubeTextureWithName: (const char*)name device: (id <MTLDevice>) device;
-//
-//+ (id <MTLTexture>)loadDDSCubeTextureWithName: (const char*)name device: (id <MTLDevice>) device;
-//
-//@end
 
 #endif

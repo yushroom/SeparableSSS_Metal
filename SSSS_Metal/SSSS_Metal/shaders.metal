@@ -56,10 +56,11 @@ fragment half4 lighting_fragment(ColorInOut in [[stage_in]])
 //typedef float3 vec3;
 //typedef float4 vec4;
 
-// texture sampler
+// texture samplers
 //***********************************************************************
 constexpr sampler linear_sampler(coord::normalized, address::clamp_to_edge, filter::linear);
 constexpr sampler point_sampler(address::clamp_to_edge, filter::nearest);
+constexpr sampler shadow_sampler(compare_func::less, filter::nearest);
 
 struct v2f_position {
     float4 position [[ position ]];
@@ -158,29 +159,163 @@ vertex v2f_main_pass main_pass_vert(constant AAPL::constant_main_pass& constants
     out.position = constants.MVP * pos;
     out.uv = uvs[vid];
     out.world_position = (constants.Model * pos).xyz;
-    out.view = constants.camera_position - out.world_position;
+    out.view = constants.camera_position.xyz - out.world_position;
     constant auto& mit = constants.ModelInverseTranspose;
-    out.normal = mit * float3(normals[vid]);
-    out.tangent = mit * float3(tangents[vid]);
+    out.normal = (mit * float4(normals[vid], 0)).xyz;
+    out.tangent = (mit * float4(tangents[vid], 0)).xyz;
     
     return out;
 }
 
-fragment float4 main_pass_frag(v2f_main_pass input [[stage_in]],
+float3 BumpMap(texture2d<float> normal_tex, float2 uv)
+{
+    float3 bump;
+    bump.xy = -1.0 + 2.0 * normal_tex.sample(linear_sampler, uv).gr;
+    bump.z = sqrt(1.0 - bump.x * bump.x - bump.y * bump.y);
+    return normalize(bump);
+}
+
+// H: half
+float Fresnel(float3 H, float3 view, float f0) {
+    float base = 1.0 - dot(view, H);
+    float exponential = pow(base, 5.0);
+    return exponential + f0 * (1.0 - exponential);
+}
+
+
+float SpecularKSK(texture2d<float> beckmann_tex, float3 normal, float3 light, float3 view, float roughness, float specularFresnel)
+{
+    float3 H = view + light;
+    float3 HN = normalize(H);
+    
+    float NdotL = max(dot(normal, light), 0.0);
+    float NdotH = max(dot(normal, HN), 0.0);
+    
+    float ph = pow(2.0 * beckmann_tex.sample(linear_sampler, float2(NdotH, roughness)).r, 10.0f);
+    float f = mix(0.25, Fresnel(HN, view, 0.028), specularFresnel);
+    float ksk = max(ph * f / dot(H, H), 0.0);
+    
+    return NdotL * ksk;
+}
+
+//float shadowPCF(float3 world_pos, depth2d<float> shadow_texture)
+//{
+//    shadow_texture.sample_compare(shadow_sampler, lights[i])
+//}
+
+
+//void process(constant AAPL::SLight& light, float3 world_position,  texture2d<float> depth_texture,
+//             texture2d<float> beckmann_tex, float4 albedo, float shadow, float3 normal, float3 view,
+//             float intensity, float roughness, float specularFresnel, device float4& out_specular_color, device float4& out_color)
+//{
+//    float3 L = light.position - world_position.xyz;
+//    float dist = length(L);
+//    L /= dist;
+//    
+//    float spot = dot(light.direction, -L);
+//    if (spot > light.falloffStart)
+//    {
+//        float curve = min(pow(dist / light.farPlane, 6.0), 1.0);
+//        float attenuation = mix(1.0 / (1.0 + light.attenuation * dist * dist), 0, curve);
+//        
+//        spot = saturate( (spot - light.falloffStart) / light.falloffStart );
+//        
+//        float3 f1 = light.color * attenuation * spot;
+//        float3 f2 = albedo.rgb * f1;
+//        
+//        float3 diffuse = float3(saturate(dot(L, normal)));
+//        float specular = intensity * SpecularKSK(beckmann_tex, normal, L, view, roughness, specularFresnel);
+//        
+//        out_specular_color.rgb += f1 * specular;
+//        out_color.rgb += f2 * diffuse;
+//        out_color.rgb += f1 * specular;
+//    }
+//}
+
+fragment float4 main_pass_frag(constant AAPL::constant_main_pass& constants [[ buffer(0) ]],
+                               v2f_main_pass input [[stage_in]],
                                texture2d<float> diffuse_tex [[ texture(0) ]],
                                texture2d<float> specularAO_tex [[ texture(1) ]],
                                texture2d<float> normal_map_tex [[ texture(2) ]],
                                texture2d<float> beckmann_tex [[ texture(3) ]],
-                               texture2d<float> irradiance_tex [[ texture(4) ]]
-                               //texture2d<float> shadow_maps_1 [[ texture(5) ]],
-                               //texture2d<float> shadow_maps_2 [[ texture(6) ]],
-                               //texture2d<float> shadow_maps_3 [[ texture(7) ]],
-                               //texture2d<float> depth_textures_0 [[ texture(8) ]],
-                               //texture2d<float> depth_textures_1 [[ texture(9) ]],
-                               //texture2d<float> depth_textures_2 [[ texture(10) ]]
+                               texturecube<float> irradiance_tex [[ texture(4) ]],
+                               depth2d<float> shadow_maps_1 [[ texture(5) ]],
+                               depth2d<float> shadow_maps_2 [[ texture(6) ]],
+                               depth2d<float> shadow_maps_3 [[ texture(7) ]]
                                )
-{ 
-    return diffuse_tex.sample(linear_sampler, input.uv);
-}
+{
+    float3 in_normal = normalize(input.normal);
+    float3 tangent = normalize(input.tangent);
+    float3 bitangent = normalize(cross(tangent, in_normal));
+    float3x3 tbn = mat3(tangent, bitangent, in_normal);
+    
+    float2 uv_for_dds = float2(input.uv.x, 1.0 - input.uv.y);
+    float3 bump_normal = BumpMap(normal_map_tex, uv_for_dds);
+    float3 tangent_normal = mix(float3(0, 0, 1), bump_normal, constants.bumpiness);
+    float3 normal = tbn * tangent_normal;
+    float3 view = normalize(input.view);
+    
+    float4 albedo = diffuse_tex.sample(linear_sampler, input.uv);
+    float3 specularAO = specularAO_tex.sample( linear_sampler, uv_for_dds).bgr;
+    
+    float occlusion = specularAO.b;
+    float intensity = specularAO.r * constants.specularIntensity;
+    float roughness = (specularAO.g / 0.3) * constants.specularRoughness;
+    
+    float4 out_color = float4(0, 0, 0, 0);
+    
+    float shadow_1, shadow_2, shadow_3;
+    float4 shadow_pos[N_LIGHTS];
+    for (int i = 0; i < N_LIGHTS; i++)
+    {
+        shadow_pos[i] = constants.lights[i].viewProjection * float4(input.world_position, 1);
+    }
+    shadow_1 = shadow_maps_1.sample_compare(shadow_sampler, input.uv, shadow_pos[0].z);
+    shadow_2 = shadow_maps_1.sample_compare(shadow_sampler, input.uv, shadow_pos[1].z);
+    shadow_3 = shadow_maps_1.sample_compare(shadow_sampler, input.uv, shadow_pos[2].z);
+    //shadow[0] = Sh
+    
+    //float4 out_color = vec4(0);
+    float4 out_specular_color = vec4(0);
+    
+//    void process(constant AAPL::SLight& light, float3 world_position,  depth2d<float> depth_texture,
+//                 texture2d<float> beckmann_tex, float4 albedo, float shadow, float3 normal, float3 view,
+//                 float intensity, float roughness, float specularFresnel, device float4& out_specular_color, device float4& out_color)
+//    process(constants.lights[0], input.world_position, shadow_maps_1,
+//            beckmann_tex, albedo, shadow_1, normal, view,
+//            intensity, roughness, constants.specularFresnel, out_specular_color, out_color);
 
-/********** main pass END **********/
+    for (int i = 0; i < N_LIGHTS; i++)
+    {
+        constant auto& light = constants.lights[i];
+        float3 L = light.position - input.world_position;
+        float dist = length(L);
+        L /= dist;
+        
+        float spot = dot(light.direction, -L);
+        if (spot > light.falloffStart)
+        {
+            float curve = min(pow(dist / light.farPlane, 6.0), 1.0);
+            float attenuation = mix(1.0 / (1.0 + light.attenuation * dist * dist), 0.0, curve);
+            
+            spot = saturate((spot - light.falloffStart) / light.falloffWidth);
+            
+            float3 f1 = light.color * attenuation * spot;
+            float3 f2 = albedo.rgb * f1;
+            
+            float3 diffuse = saturate(dot(L, normal));
+            float specular = intensity * SpecularKSK(beckmann_tex, normal, L, view, roughness, constants.specularFresnel);
+            
+            float shadow = 1.0f;
+            
+            //out_color += shadow * f2 * diffuse;
+            out_color.rgb += shadow * (f2 * diffuse + f1 * specular);
+        }
+    }
+    
+    
+    out_color.rgb += occlusion * constants.ambient * albedo.rgb * irradiance_tex.sample(linear_sampler, normal).rgb;
+    
+    return out_color;
+    //return float4(input.normal, 1.0);
+}
