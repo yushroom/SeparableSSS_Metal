@@ -13,6 +13,9 @@
 #include <assimp/postprocess.h>
 
 
+Model ModelManager::screen_aligned_quad;
+Model ModelManager::triangle;
+
 void Model::_loadMeshFromFile(const std::string& str_path)
 {
     _vertices.clear();

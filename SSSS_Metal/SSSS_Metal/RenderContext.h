@@ -1,13 +1,16 @@
 #ifndef RENDERCONTEX_H
 #define RENDERCONTEX_H
 
+#include <Metal/Metal.h>
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "Camera.h"
-//#include "Shader.h"
 
-class RenderContex
+static const long kInFlightCommandBuffers = 3;
+
+class RenderContext
 {
 public:
 
@@ -19,6 +22,11 @@ public:
 
 	static int window_width;
 	static int window_height;
+    
+    static id <MTLDevice> device;
+    static id <MTLLibrary> _defaultLibrary;
+    
+    static NSUInteger current_buffer_index;
 
 	static glm::mat4 model_mat;
 	static glm::mat4 prev_mvp;
@@ -35,7 +43,7 @@ public:
 	}
 
 private:
-	RenderContex();
+	RenderContext();
 };
 
 

@@ -82,6 +82,13 @@ namespace AAPL
         
         SLight lights[3];
     };
+    
+    struct constant_ssss_pass
+    {
+        float sssWidth;
+        float2 dir;
+        bool initStencil;
+    };
 }
 
 

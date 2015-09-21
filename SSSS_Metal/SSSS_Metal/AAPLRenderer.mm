@@ -15,7 +15,7 @@
 #import "AAPLTransforms.h"
 #import "AAPLSharedTypes.h"
 
-#include "RenderContex.h"
+#include "RenderContext.h"
 #include "Utilities.h"
 #include "Model.h"
 #include "TextureLoader.h"
@@ -25,6 +25,8 @@
 #include "Camera.h"
 #include "Light.hpp"
 
+#include "SeparableSSS.h"
+
 #define CAMERA_FOV 20.0f
 #define PI 3.1415926536f
 
@@ -33,26 +35,11 @@
 using namespace AAPL;
 using namespace simd;
 
-static const long kInFlightCommandBuffers = 3;
-
-static const NSUInteger kNumberOfBoxes = 2;
-static const vec4 kBoxAmbientColors[2] = {
-    {0.18, 0.24, 0.8, 1.0},
-    {0.8, 0.24, 0.1, 1.0}
-};
-
-static const vec4 kBoxDiffuseColors[2] = {
-    {0.4, 0.4, 1.0, 1.0},
-    {0.8, 0.4, 0.4, 1.0}
-};
-
-
 @implementation AAPLRenderer
 {
     CFTimeInterval              _frameTime;
     // constant synchronization for buffering <kInFlightCommandBuffers> frames
     dispatch_semaphore_t        _inflight_semaphore;
-    id <MTLBuffer>              _dynamicConstantBuffer[kInFlightCommandBuffers];
     id <MTLBuffer>              _shadow_pass_buffer[kInFlightCommandBuffers][N_LIGHTS];
     id <MTLBuffer>              _sky_pass_buffer[kInFlightCommandBuffers];
     id <MTLBuffer>              _main_pass_buffer[kInFlightCommandBuffers];
@@ -76,22 +63,19 @@ static const vec4 kBoxDiffuseColors[2] = {
     id <MTLDepthStencilState>   _depth_state_sky;
     id <MTLDepthStencilState>   _depth_state_ssss;
     
-    // globals used in update calculation
-    float4x4    _projectionMatrix;
-    float4x4    _viewMatrix;
-    float       _rotation;
-    
-    long        _maxBufferBytesPerFrame;
-    size_t      _sizeOfConstantT;
-    
     DepthStencil    _depth_stencil;
     RenderTexture   _rt_main;
+    RenderTexture   _rt_depth;
     
     Model       _model_head;
     Model       _model_sphere;
     Model       _model_quad;
     Camera      _camera;
     Light       _lights[N_LIGHTS];
+    
+    bool        enable_ssss;
+    
+    SeparableSSS ssss;
     
     id <MTLTexture>     _tex_sky;
     id <MTLTexture>     _tex_head_diffuse;
@@ -102,7 +86,7 @@ static const vec4 kBoxDiffuseColors[2] = {
     
     // this value will cycle from 0 to g_max_inflight_buffers whenever a display completes ensuring renderer clients
     // can synchronize between g_max_inflight_buffers count buffers, and thus avoiding a constant buffer from being overwritten between draws
-    NSUInteger _constantDataBufferIndex;
+    //NSUInteger _constantDataBufferIndex;
 }
 
 - (instancetype)init
@@ -110,9 +94,7 @@ static const vec4 kBoxDiffuseColors[2] = {
     self = [super init];
     if (self) {
         
-        _sizeOfConstantT = sizeof(constants_t);
-        _maxBufferBytesPerFrame = _sizeOfConstantT*kNumberOfBoxes;
-        _constantDataBufferIndex = 0;
+        RenderContext::current_buffer_index = 0;
         _inflight_semaphore = dispatch_semaphore_create(kInFlightCommandBuffers);
     }
     return self;
@@ -125,9 +107,13 @@ static const vec4 kBoxDiffuseColors[2] = {
     // find a usable Device
     _device = view.device;
     
-    int width = view.bounds.size.width;
-    int height = view.bounds.size.height;
-    RenderContex::set_window_size(width, height);
+    
+    enable_ssss = true;
+    
+    
+    int width = view.bounds.size.width * 2;
+    int height = view.bounds.size.height * 2;
+    RenderContext::set_window_size(width, height);
     
     // setup view with drawable formats
     view.depthPixelFormat   = MTLPixelFormatDepth32Float;
@@ -158,13 +144,6 @@ static const vec4 kBoxDiffuseColors[2] = {
     // In this case triple buffering is the optimal way to go so we cycle through 3 memory buffers
     for (int i = 0; i < kInFlightCommandBuffers; i++)
     {
-        _dynamicConstantBuffer[i] = [_device newBufferWithLength:_maxBufferBytesPerFrame options:0];
-        _dynamicConstantBuffer[i].label = [NSString stringWithFormat:@"ConstantBuffer%i", i];
-        
-        // write initial color values for both cubes (at each offset).
-        // Note, these will get animated during update
-        // constants_t *constant_buffer = (constants_t *)[_dynamicConstantBuffer[i] contents];
-        
         for (int j = 0; j < N_LIGHTS; j++)
         {
             _shadow_pass_buffer[i][j] = [_device newBufferWithLength: sizeof(constants_mvp) options:0];
@@ -173,9 +152,7 @@ static const vec4 kBoxDiffuseColors[2] = {
         
         _sky_pass_buffer[i] = [_device newBufferWithLength: sizeof(constants_mvp) options:0];
         _sky_pass_buffer[i].label = [NSString stringWithFormat: @"sky_pass_constant_buffer%i", i];
-        //auto s = sizeof(constant_main_pass);
-        //auto s2 = sizeof(glm::vec3);
-        //auto s3 = sizeof(glm::mat3);
+
         _main_pass_buffer[i] = [_device newBufferWithLength:sizeof(constant_main_pass) options:0];
         _main_pass_buffer[i].label = [NSString stringWithFormat: @"main_pass_constant_buffer%i", i];
     }
@@ -202,9 +179,12 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         _lights[i].init(_device);
     }
     
+    ModelManager::static_init(_device);
+    
     load_preset(IOS_PATH("Preset", "Preset9", "txt"), _camera, _lights);
     
     _rt_main.init(_device, MTLPixelFormatRGBA8Unorm);
+    _rt_depth.init(_device, MTLPixelFormatR32Float);
     _depth_stencil.init(_device);
     
     // load resources
@@ -219,7 +199,11 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
     _tex_head_normal_map    = TextureLoader::CreateTexture(_device,         IOS_PATH("head", "NormalMap_RG16f_1024_mipmaps", "dds"),    MTLPixelFormatRG16Float);
     _tex_sky                = TextureLoader::CreateTextureCubemap(_device,  IOS_PATH("StPeters", "DiffuseMap", "dds"),                  MTLPixelFormatRGBA16Float);
     _tex_sky_irradiance_map = TextureLoader::CreateTextureCubemap(_device,  IOS_PATH("StPeters", "IrradianceMap", "dds"),               MTLPixelFormatRGBA32Float);
-    _tex_beckmann           = TextureLoader::CreateTexture(_device,         IOS_PATH("Texture", "BeckmannMap", "dds"),                  MTLPixelFormatRG8Unorm);
+    _tex_beckmann           = TextureLoader::CreateTexture(_device,         IOS_PATH("Texture", "BeckmannMap", "dds"),                  MTLPixelFormatR8Unorm);
+    
+    SeparableSSS::static_init();
+    ssss.init(_device, CAMERA_FOV, 0.012f);
+    ssss.prepare_pipeline_state(_device, _defaultLibrary, _rt_main);
     
     
     // Shader loading
@@ -252,9 +236,12 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         desc.vertexFunction = main_vert;
         desc.fragmentFunction = main_frag;
         desc.colorAttachments[0].pixelFormat = _rt_main.pixel_format();
+        desc.colorAttachments[1].pixelFormat = _rt_depth.pixel_format();
         desc.depthAttachmentPixelFormat = _depth_stencil.pixel_format();
         _pipeline_main_pass = [_device newRenderPipelineStateWithDescriptor: desc error:&err];
         CheckPipelineError(_pipeline_main_pass, err);
+        
+        desc.colorAttachments[1].pixelFormat = MTLPixelFormatInvalid;
         
         desc.label = @"Sky Pass";
         desc.vertexFunction = skydome_vert;
@@ -267,9 +254,9 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         desc.label = @"Quad Pass";
         desc.vertexFunction = quad_vert;
         desc.fragmentFunction = quad_frag;
-        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
         desc.depthAttachmentPixelFormat = view.depthPixelFormat;
-        _pipeline_quad= [_device newRenderPipelineStateWithDescriptor: desc error: & err];
+        _pipeline_quad = [_device newRenderPipelineStateWithDescriptor: desc error: & err];
         CheckPipelineError(_pipeline_quad, err);
     }
     
@@ -310,10 +297,21 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
     {
         _render_pass_desc_main = [MTLRenderPassDescriptor renderPassDescriptor];
         auto color_attachment_0 = _render_pass_desc_main.colorAttachments[0];
+        auto color_attachment_1 = _render_pass_desc_main.colorAttachments[1];
+        //color_attachment_0.texture = _rt_main.msaa_texture();
+        //color_attachment_0.resolveTexture = _rt_main.texture();
         color_attachment_0.texture = _rt_main.texture();
         color_attachment_0.loadAction = MTLLoadActionClear;
+        //color_attachment_0.storeAction = MTLStoreActionMultisampleResolve;
         color_attachment_0.storeAction = MTLStoreActionStore;
         color_attachment_0.clearColor = MTLClearColorMake(1, 0, 0, 1);
+        
+        color_attachment_1.texture = _rt_depth.texture();
+        color_attachment_1.loadAction = MTLLoadActionClear;
+        //color_attachment_0.storeAction = MTLStoreActionMultisampleResolve;
+        color_attachment_1.storeAction = MTLStoreActionStore;
+        color_attachment_1.clearColor = MTLClearColorMake(1, 0, 0, 1);
+        
         auto depth_attachment = _render_pass_desc_main.depthAttachment;
         depth_attachment.texture = _depth_stencil.get_depth_stencil_texture();
         depth_attachment.loadAction = MTLLoadActionClear;
@@ -340,7 +338,7 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
 #pragma mark Render
 - (void)ShdowPass: (id<MTLCommandBuffer>)commandBuffer
 {
-    RenderContex::model_mat = glm::scale(mat4(1.0f), vec3(0.7f, 0.7f, 0.7f)) * glm::translate(mat4(1.0f), vec3(0, 0.2f, 0.425f));
+    RenderContext::model_mat = glm::scale(mat4(1.0f), vec3(0.7f, 0.7f, 0.7f)) * glm::translate(mat4(1.0f), vec3(0, 0.2f, 0.425f));
     for (int i = 0; i < N_LIGHTS; i++)
     {
         auto encoder = [commandBuffer renderCommandEncoderWithDescriptor: _lights[i].shadowMap.renderPassDescriptor()];
@@ -353,10 +351,21 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         [encoder setCullMode: MTLCullModeFront];
         [encoder setDepthBias:0.01 slopeScale: 1.0f clamp: 0.01];
         
-        RenderContex::camera = &_lights[i].camera;
-        auto uniform_buffer = (constants_mvp*)[_shadow_pass_buffer[_constantDataBufferIndex][i] contents];
-        uniform_buffer->MVP = to_simd_type(RenderContex::get_mvp_mat());
-        [encoder setVertexBuffer:_shadow_pass_buffer[_constantDataBufferIndex][i] offset:0 atIndex:0 ];
+//        auto proj = _lights[i].camera.getProjectionMatrix();
+//        auto linear_proj = proj;
+//        float Q = proj[2][2];
+//        float N = -proj[3][2] / Q;
+//        float F = -N * Q / (1-Q);
+//        linear_proj[2][2] /= F;
+//        linear_proj[3][2] /= F;
+//        
+//        auto mvp = linear_proj * _lights[i].camera.getViewMatrix() * RenderContex::model_mat;
+        
+        RenderContext::camera = &_lights[i].camera;
+        auto uniform_buffer = (constants_mvp*)[_shadow_pass_buffer[RenderContext::current_buffer_index][i] contents];
+        uniform_buffer->MVP = to_simd_type(RenderContext::get_mvp_mat());
+        //uniform_buffer->MVP = to_simd_type(mvp);
+        [encoder setVertexBuffer:_shadow_pass_buffer[RenderContext::current_buffer_index][i] offset:0 atIndex:0 ];
         
         _model_head.render(encoder, true, true, true);
         
@@ -372,11 +381,11 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         bool enable_ssss = true;
         bool enable_sss_translucency = true;
         float sss_width = 0.012f;
-        vec3 sss_strength = vec3(0.48f, 0.41f, 0.28f);
-        vec3 sss_falloff = vec3(1.0f, 0.37f, 0.3f);
-        float translucency = 0.88f;	// TODO
+        //vec3 sss_strength = vec3(0.48f, 0.41f, 0.28f);
+        //vec3 sss_falloff = vec3(1.0f, 0.37f, 0.3f);
+        float translucency = 0.1f;	// TODO 0.88
         
-        double speed = 1;
+        //double speed = 1;
         float specularIntensity = 1.88f;
         float specularRoughness = 0.3f;
         float specularFresnel = 0.82f;
@@ -392,12 +401,12 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         [encoder setRenderPipelineState: _pipeline_main_pass];
         [encoder setCullMode: MTLCullModeFront];
         
-        auto constant_buffer = (constant_main_pass*)[ _main_pass_buffer[_constantDataBufferIndex] contents];
-        RenderContex::camera = &_camera;
-        RenderContex::model_mat = glm::scale(mat4(1.0f), vec3(0.7f, 0.7f, 0.7f)) * glm::translate(mat4(1.0f), vec3(0, 0.2f, 0.425f));;
-        constant_buffer->MVP = to_simd_type(RenderContex::get_mvp_mat());
-        constant_buffer->Model = to_simd_type(RenderContex::model_mat);
-        constant_buffer->ModelInverseTranspose = to_simd_type(RenderContex::get_model_inverse_transpose());
+        auto constant_buffer = (constant_main_pass*)[ _main_pass_buffer[RenderContext::current_buffer_index] contents];
+        RenderContext::camera = &_camera;
+        RenderContext::model_mat = glm::scale(mat4(1.0f), vec3(0.7f, 0.7f, 0.7f)) * glm::translate(mat4(1.0f), vec3(0, 0.2f, 0.425f));;
+        constant_buffer->MVP = to_simd_type(RenderContext::get_mvp_mat());
+        constant_buffer->Model = to_simd_type(RenderContext::model_mat);
+        constant_buffer->ModelInverseTranspose = to_simd_type(RenderContext::get_model_inverse_transpose());
         constant_buffer->camera_position = to_simd_type(vec4(_camera.getEyePosition(), 1.0));
         
         constant_buffer->bumpiness = bumpiness;
@@ -418,17 +427,17 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
             auto& pos = lc.getEyePosition();
             constant_buffer->lights[i].position = to_simd_type(pos);
             constant_buffer->lights[i].direction = to_simd_type(lc.getLookAtPosition() - pos);
+            constant_buffer->lights[i].color = to_simd_type(l.color);
             constant_buffer->lights[i].falloffStart = cos(0.5f * l.fov);
             constant_buffer->lights[i].falloffWidth = falloff_width;
-            constant_buffer->lights[i].color = to_simd_type(l.color);
             constant_buffer->lights[i].attenuation = l.attenuation;
             constant_buffer->lights[i].farPlane = l.farPlane;
             constant_buffer->lights[i].bias = l.bias;
             constant_buffer->lights[i].viewProjection = to_simd_type(ShadowMap::getViewProjectionTextureMatrix(lc.getViewMatrix(), lc.getProjectionMatrix()));
         }
 
-        [encoder setVertexBuffer: _main_pass_buffer[_constantDataBufferIndex] offset:0 atIndex:0];
-        [encoder setFragmentBuffer: _main_pass_buffer[_constantDataBufferIndex] offset:0 atIndex:0];
+        [encoder setVertexBuffer: _main_pass_buffer[RenderContext::current_buffer_index] offset:0 atIndex:0];
+        [encoder setFragmentBuffer: _main_pass_buffer[RenderContext::current_buffer_index] offset:0 atIndex:0];
         [encoder setFragmentTexture: _tex_head_diffuse atIndex:0];
         [encoder setFragmentTexture: _tex_head_specularAO atIndex:1];
         [encoder setFragmentTexture: _tex_head_normal_map atIndex:2];
@@ -453,11 +462,11 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         [encoder setRenderPipelineState: _pipeline_skydome];
         [encoder setCullMode: MTLCullModeBack];
         
-        auto constant_buffer = (constants_mvp*)[_sky_pass_buffer[_constantDataBufferIndex] contents];
-        RenderContex::camera = &_camera;
-        RenderContex::model_mat = glm::scale(glm::mat4(1.0f), glm::vec3(2.f));
-        constant_buffer->MVP = to_simd_type( RenderContex::get_mvp_mat() );
-        [encoder setVertexBuffer:_sky_pass_buffer[_constantDataBufferIndex] offset:0 atIndex:0];
+        auto constant_buffer = (constants_mvp*)[_sky_pass_buffer[RenderContext::current_buffer_index] contents];
+        RenderContext::camera = &_camera;
+        RenderContext::model_mat = glm::scale(glm::mat4(1.0f), glm::vec3(2.f));
+        constant_buffer->MVP = to_simd_type( RenderContext::get_mvp_mat() );
+        [encoder setVertexBuffer:_sky_pass_buffer[RenderContext::current_buffer_index] offset:0 atIndex:0];
         [encoder setFragmentTexture: _tex_sky atIndex:0];
         
         _model_sphere.render(encoder);
@@ -506,6 +515,17 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
     [self ShdowPass: commandBuffer];
     [self MainPass: commandBuffer];
     
+    if (enable_ssss)
+    {
+        float sss_width = 0.012f;
+        vec3 sss_strength = vec3(0.48f, 0.41f, 0.28f);
+        vec3 sss_falloff = vec3(1.0f, 0.37f, 0.3f);
+        ssss.setStrength(sss_strength);
+        ssss.setFalloff(sss_falloff);
+        ssss.setWidth(sss_width);
+        ssss.render(commandBuffer, _rt_main, _rt_depth, _depth_stencil);
+    }
+    
     [self DrawTextureToScreen: _rt_main.texture() commandBuffer: commandBuffer view: view];
     
     [commandBuffer presentDrawable: view.currentDrawable];
@@ -526,7 +546,7 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
     // Once the CPU has completed updating a shared CPU/GPU memory buffer region for a frame, this index should be updated so the
     // next portion of the ring buffer can be written by the CPU. Note, this should only be done *after* all writes to any
     // buffers requiring synchronization for a given frame is done in order to avoid writing a region of the ring buffer that the GPU may be reading.
-    _constantDataBufferIndex = (_constantDataBufferIndex + 1) % kInFlightCommandBuffers;
+    RenderContext::current_buffer_index = (RenderContext::current_buffer_index + 1) % kInFlightCommandBuffers;
 }
 
 - (void)reshape:(AAPLView *)view
@@ -541,19 +561,9 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
 // called every frame
 - (void)updateConstantBuffer
 {
-    glm::mat4 model = glm::scale(mat4(1.0f), vec3(0.7f, 0.7f, 0.7f)) * glm::translate(mat4(1.0f), vec3(0, 0.2f, 0.425f));
-    mat4 modelView = _camera.getViewMatrix() * model;
-    mat4 MVP = _camera.getProjectionMatrix() * modelView;
-    
-    float4x4 baseModelViewMatrix = translate(0.0f, 0.2f, 0.425f) * scale(0.7f, 0.7f, 0.7f);
-    baseModelViewMatrix = _viewMatrix * baseModelViewMatrix;
-    
-    constants_t *constant_buffer = (constants_t *)[_dynamicConstantBuffer[_constantDataBufferIndex] contents];
-    for (int i = 0; i < kNumberOfBoxes; i++)
-    {
-        constant_buffer[i].normal_matrix = to_simd_type(inverse(transpose(modelView)));
-        constant_buffer[i].MVP = to_simd_type(MVP);
-    }
+//    glm::mat4 model = glm::scale(mat4(1.0f), vec3(0.7f, 0.7f, 0.7f)) * glm::translate(mat4(1.0f), vec3(0, 0.2f, 0.425f));
+//    mat4 modelView = _camera.getViewMatrix() * model;
+//    mat4 MVP = _camera.getProjectionMatrix() * modelView;
 }
 
 // just use this to update app globals
@@ -567,6 +577,11 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
 {
     // timer is suspended/resumed
     // Can do any non-rendering related background work here when suspended
+}
+
+- (void)enable_ssss: (BOOL)enabled
+{
+    enable_ssss = enabled;
 }
 
 

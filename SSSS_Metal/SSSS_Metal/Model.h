@@ -10,12 +10,11 @@
 #define MetalBasic3D_Model_h
 
 #include <vector>
-
+#import <Metal/Metal.h>
 #include <glm/glm.hpp>
 
 #include "Debug.h"
-
-#import <Metal/Metal.h>
+#include "Utilities.h"
 
 using glm::vec3;
 using glm::vec2;
@@ -116,6 +115,23 @@ private:
         
         _vertexBuffer.label = @"Vertices";
     }
-    
 };
+
+class ModelManager
+{
+public:
+    
+    static void static_init(id <MTLDevice> device)
+    {
+        //screen_aligned_quad.init("media/quad.obj", false, false, false);
+        screen_aligned_quad.init(device, IOS_PATH("Models", "Quad", "obj"), false, false, false, false);
+    }
+    
+    static Model triangle;
+    static Model screen_aligned_quad;
+    
+private:
+    ModelManager() {};
+};
+
 #endif

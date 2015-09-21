@@ -9,8 +9,14 @@
 #import "AAPLViewController.h"
 #import "AAPLView.h"
 #import "AAPLRenderer.h"
-
 #import <QuartzCore/CAMetalLayer.h>
+
+
+@interface AAPLViewController ()
+
+- (IBAction)switchSSSSAction:(id)sender;
+
+@end
 
 @implementation AAPLViewController
 {
@@ -224,4 +230,8 @@
     [self stopGameLoop];
 }
 
+- (IBAction)switchSSSSAction:(id)sender {
+    UISwitch * switchButton = (UISwitch*)sender;
+    [_renderer enable_ssss: [switchButton isOn]];
+}
 @end

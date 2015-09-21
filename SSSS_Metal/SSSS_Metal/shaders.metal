@@ -12,49 +12,13 @@
 
 using namespace metal;
 
-// variables in constant address space
-constant float3 light_position = float3(10.0, 10.0, 10.0);
-
-struct ColorInOut {
-    float4 position [[position]];
-    half4 color;
-};
-
-// vertex shader function
-vertex ColorInOut lighting_vertex(constant AAPL::constants_t& constants [[ buffer(0) ]],
-                                  device packed_float3* position [[ buffer(1) ]],
-                                  device packed_float3* normal [[ buffer(2) ]],
-                                  uint vid [[ vertex_id ]])
-{
-    ColorInOut out;
-    
-	float4 in_position = float4(float3(position[vid]), 1.0);
-    out.position = constants.MVP * in_position;
-    
-    float3 n = normal[vid];
-    float4 eye_normal = normalize(constants.normal_matrix * float4(n, 0.0));
-    float n_dot_l = dot(eye_normal.rgb, normalize(light_position));
-    n_dot_l = fmax(0.0, n_dot_l);
-    
-    out.color = half4(n_dot_l);
-    //out.color = half4(1, 0.5, 0.3, 1);
-    
-    return out;
-}
-
-// fragment shader function
-fragment half4 lighting_fragment(ColorInOut in [[stage_in]])
-{
-    return in.color;
-};
-
 #define N_LIGHTS 3
 
-//typedef float3x3 mat3;
-//typedef float4x4 mat4;
-//typedef float2 vec2;
-//typedef float3 vec3;
-//typedef float4 vec4;
+typedef float3x3 mat3;
+typedef float4x4 mat4;
+typedef float2 vec2;
+typedef float3 vec3;
+typedef float4 vec4;
 
 // texture samplers
 //***********************************************************************
@@ -105,6 +69,7 @@ vertex v2f_position shadow_pass_vert(constant AAPL::constants_mvp& constants [[ 
 {
     v2f_position output;
     output.position = constants.MVP * float4(positions[vid], 1.0);
+    //output.position.z *= output.position.w; // We want linear positions
     return output;
 }
 
@@ -145,6 +110,11 @@ struct v2f_main_pass {
     float3 view;
     float3 normal;
     float3 tangent;
+};
+
+struct frag_out_main_pass {
+    float4 color    [[color(0)]];
+    float depth     [[color(1)]];
 };
 
 vertex v2f_main_pass main_pass_vert(constant AAPL::constant_main_pass& constants [[ buffer(0) ]],
@@ -198,41 +168,70 @@ float SpecularKSK(texture2d<float> beckmann_tex, float3 normal, float3 light, fl
     return NdotL * ksk;
 }
 
-//float shadowPCF(float3 world_pos, depth2d<float> shadow_texture)
-//{
-//    shadow_texture.sample_compare(shadow_sampler, lights[i])
-//}
+// get original z [(mvp * v).z] from z in shadowMap
+float to_frag_z(float z)
+{
+    float far = 10.0f;
+    float near = 0.1f;
+    float frag_z = far*near / (far-z*(far-near));
+    return (frag_z-near)*far / (far-near);
+}
 
+//-----------------------------------------------------------------------------
+// Separable SSS Transmittance Function
 
-//void process(constant AAPL::SLight& light, float3 world_position,  texture2d<float> depth_texture,
-//             texture2d<float> beckmann_tex, float4 albedo, float shadow, float3 normal, float3 view,
-//             float intensity, float roughness, float specularFresnel, device float4& out_specular_color, device float4& out_color)
-//{
-//    float3 L = light.position - world_position.xyz;
-//    float dist = length(L);
-//    L /= dist;
-//    
-//    float spot = dot(light.direction, -L);
-//    if (spot > light.falloffStart)
-//    {
-//        float curve = min(pow(dist / light.farPlane, 6.0), 1.0);
-//        float attenuation = mix(1.0 / (1.0 + light.attenuation * dist * dist), 0, curve);
-//        
-//        spot = saturate( (spot - light.falloffStart) / light.falloffStart );
-//        
-//        float3 f1 = light.color * attenuation * spot;
-//        float3 f2 = albedo.rgb * f1;
-//        
-//        float3 diffuse = float3(saturate(dot(L, normal)));
-//        float specular = intensity * SpecularKSK(beckmann_tex, normal, L, view, roughness, specularFresnel);
-//        
-//        out_specular_color.rgb += f1 * specular;
-//        out_color.rgb += f2 * diffuse;
-//        out_color.rgb += f1 * specular;
-//    }
-//}
+vec3 SSSSTransmittance(float translucency, float sssWidth, vec3 worldPosition, vec3 worldNormal, vec3 light, depth2d<float> shadowMap, mat4 lightViewProjection, float lightFarPlane) {
+    /**
+     * Calculate the scale of the effect.
+     */
+    float scale = 8.25 * (1.0 - translucency) / sssWidth;
+    
+    /**
+     * First we shrink the position inwards the surface to avoid artifacts:
+     * (Note that this can be done once for all the lights)
+     */
+    vec4 shrinkedPos = vec4(worldPosition - 0.005 * worldNormal, 1.0);
+    
+    /**
+     * Now we calculate the thickness from the light point of view:
+     */
+    vec4 shadowPosition = lightViewProjection * shrinkedPos;
+    
+    
+    
+    shadowPosition.xyz /= shadowPosition.w;
+    //float d1 = texture(shadowMap, shadowPosition.xy).r;
+    float d1 = shadowMap.sample(point_sampler, shadowPosition.xy);
+    //d1 = to_frag_z(d1);
+    float d2 = shadowPosition.z;
+    //d2 = 0.5 * d2 + 0.5;
+    float d = scale * abs(d1 - d2);
+    
+    /**
+     * Armed with the thickness, we can now calculate the color by means of the
+     * precalculated transmittance profile.
+     * (It can be precomputed into a texture, for maximum performance):
+     */
+    float dd = -d * d;
+    //vec3 profile = texture(shadowMap, frag_uv).rgb;
+    vec3 profile = vec3(0.233, 0.455, 0.649) * exp(dd / 0.0064) +
+    vec3(0.1,   0.336, 0.344) * exp(dd / 0.0484) +
+    vec3(0.118, 0.198, 0.0)   * exp(dd / 0.187)  +
+    vec3(0.113, 0.007, 0.007) * exp(dd / 0.567)  +
+    vec3(0.358, 0.004, 0.0)   * exp(dd / 1.99)   +
+    vec3(0.078, 0.0,   0.0)   * exp(dd / 7.41);
+    //vec3 profile = vec3(0);
+    
+    /**
+     * Using the profile, we finally approximate the transmitted lighting from
+     * the back of the object:
+     */
+    return profile * saturate(0.3 + dot(light, -worldNormal));
+    //return vec3(1);
+    //return vec3(textureProj(shadowMap, shadowPosition));
+}
 
-fragment float4 main_pass_frag(constant AAPL::constant_main_pass& constants [[ buffer(0) ]],
+fragment frag_out_main_pass main_pass_frag(constant AAPL::constant_main_pass& constants [[ buffer(0) ]],
                                v2f_main_pass input [[stage_in]],
                                texture2d<float> diffuse_tex [[ texture(0) ]],
                                texture2d<float> specularAO_tex [[ texture(1) ]],
@@ -256,7 +255,7 @@ fragment float4 main_pass_frag(constant AAPL::constant_main_pass& constants [[ b
     float3 view = normalize(input.view);
     
     float4 albedo = diffuse_tex.sample(linear_sampler, input.uv);
-    float3 specularAO = specularAO_tex.sample( linear_sampler, uv_for_dds).bgr;
+    float3 specularAO = specularAO_tex.sample( linear_sampler, uv_for_dds).rgb;
     
     float occlusion = specularAO.b;
     float intensity = specularAO.r * constants.specularIntensity;
@@ -264,36 +263,40 @@ fragment float4 main_pass_frag(constant AAPL::constant_main_pass& constants [[ b
     
     float4 out_color = float4(0, 0, 0, 0);
     
-    float shadow_1, shadow_2, shadow_3;
+    float shadow[4];
     float4 shadow_pos[N_LIGHTS];
     for (int i = 0; i < N_LIGHTS; i++)
     {
         shadow_pos[i] = constants.lights[i].viewProjection * float4(input.world_position, 1);
+        shadow_pos[i].xyz /= shadow_pos[i].w;
+        //shadow_pos[i].z /= constants.lights[i].farPlane;
     }
-    shadow_1 = shadow_maps_1.sample_compare(shadow_sampler, input.uv, shadow_pos[0].z);
-    shadow_2 = shadow_maps_1.sample_compare(shadow_sampler, input.uv, shadow_pos[1].z);
-    shadow_3 = shadow_maps_1.sample_compare(shadow_sampler, input.uv, shadow_pos[2].z);
+    shadow[0] = shadow_maps_1.sample_compare(shadow_sampler, shadow_pos[0].xy, shadow_pos[0].z );
+    shadow[1] = shadow_maps_2.sample_compare(shadow_sampler, shadow_pos[1].xy, shadow_pos[1].z);
+    shadow[2] = shadow_maps_3.sample_compare(shadow_sampler, shadow_pos[2].xy, shadow_pos[2].z);
     //shadow[0] = Sh
     
     //float4 out_color = vec4(0);
-    float4 out_specular_color = vec4(0);
+    //float4 out_specular_color = vec4(0);
     
-//    void process(constant AAPL::SLight& light, float3 world_position,  depth2d<float> depth_texture,
-//                 texture2d<float> beckmann_tex, float4 albedo, float shadow, float3 normal, float3 view,
-//                 float intensity, float roughness, float specularFresnel, device float4& out_specular_color, device float4& out_color)
-//    process(constants.lights[0], input.world_position, shadow_maps_1,
-//            beckmann_tex, albedo, shadow_1, normal, view,
-//            intensity, roughness, constants.specularFresnel, out_specular_color, out_color);
-
+    float3 tL[N_LIGHTS];
+    float tSpot[N_LIGHTS];
+    //float3 tf1[N_LIGHTS];
+    float3 tf2[N_LIGHTS];
+    float3 tColor[N_LIGHTS];
+    
     for (int i = 0; i < N_LIGHTS; i++)
     {
         constant auto& light = constants.lights[i];
         float3 L = light.position - input.world_position;
         float dist = length(L);
         L /= dist;
+        tL[i] = L;
         
         float spot = dot(light.direction, -L);
-        if (spot > light.falloffStart)
+        tSpot[i] = spot;
+        
+        //if (spot > light.falloffStart) // DO NOT USE [if], IT'S VERY SLOW !!!!
         {
             float curve = min(pow(dist / light.farPlane, 6.0), 1.0);
             float attenuation = mix(1.0 / (1.0 + light.attenuation * dist * dist), 0.0, curve);
@@ -302,20 +305,124 @@ fragment float4 main_pass_frag(constant AAPL::constant_main_pass& constants [[ b
             
             float3 f1 = light.color * attenuation * spot;
             float3 f2 = albedo.rgb * f1;
+            tf2[i] = f2;
             
             float3 diffuse = saturate(dot(L, normal));
             float specular = intensity * SpecularKSK(beckmann_tex, normal, L, view, roughness, constants.specularFresnel);
             
-            float shadow = 1.0f;
-            
-            //out_color += shadow * f2 * diffuse;
-            out_color.rgb += shadow * (f2 * diffuse + f1 * specular);
+            //out_color.rgb += shadow[i] * (f2 * diffuse + f1 * specular);
+            tColor[i] = shadow[i] * (f2 * diffuse + f1 * specular);
         }
     }
     
-    
+    //if (tSpot[0] > constants.lights[0].falloffStart)
+        tColor[0] += tf2[0] * SSSSTransmittance(constants.translucency, constants.sssWidth, input.world_position.xyz,
+                                                normalize(input.normal), tL[0], shadow_maps_1, constants.lights[0].viewProjection, constants.lights[0].farPlane);
+//    if (tSpot[1] > constants.lights[1].falloffStart)
+        tColor[1] += tf2[1] * SSSSTransmittance(constants.translucency, constants.sssWidth, input.world_position.xyz,
+                                                normalize(input.normal), tL[1], shadow_maps_2, constants.lights[1].viewProjection, constants.lights[1].farPlane);
+//    if (tSpot[2] > constants.lights[2].falloffStart)
+        tColor[2] += tf2[2] * SSSSTransmittance(constants.translucency, constants.sssWidth, input.world_position.xyz,
+                                                normalize(input.normal), tL[2], shadow_maps_3, constants.lights[2].viewProjection, constants.lights[2].farPlane);
+    for (int i = 0; i < N_LIGHTS; i++)
+        out_color.rgb += tColor[i] * bool(saturate(tSpot[i] - constants.lights[i].falloffStart));
     out_color.rgb += occlusion * constants.ambient * albedo.rgb * irradiance_tex.sample(linear_sampler, normal).rgb;
     
-    return out_color;
+    frag_out_main_pass out;
+    out.color = out_color;
+    out.depth = input.position.w;
+    
+    return out;
     //return float4(input.normal, 1.0);
+}
+
+
+// ssss passconstant_ssss_pass
+//***********************************************************************
+#define SSSS_FOVY 20.0
+#define SSSS_STREGTH_SOURCE (colorTex.sample(point_sampler, texcoord).a)
+#define SSSSSamplePoint(tex, coord) tex.sample(point_sampler, coord)
+#define SSSSSample(tex, coord) tex.sample(linear_sampler, coord)
+
+#define SSSS_QUALITY 0
+#if SSSS_QUALITY == 0
+#define SSSS_N_SAMPLES 11
+constant float4 ssss_kernel[] = {
+    float4(0.560479, 0.669086, 0.784728, 0),
+    float4(0.00471691, 0.000184771, 5.07566e-005, -2),
+    float4(0.0192831, 0.00282018, 0.00084214, -1.28),
+    float4(0.03639, 0.0130999, 0.00643685, -0.72),
+    float4(0.0821904, 0.0358608, 0.0209261, -0.32),
+    float4(0.0771802, 0.113491, 0.0793803, -0.08),
+    float4(0.0771802, 0.113491, 0.0793803, 0.08),
+    float4(0.0821904, 0.0358608, 0.0209261, 0.32),
+    float4(0.03639, 0.0130999, 0.00643685, 0.72),
+    float4(0.0192831, 0.00282018, 0.00084214, 1.28),
+    float4(0.00471691, 0.000184771, 5.07565e-005, 2)
+};
+#else
+#endif
+
+#define PI 3.1415926536
+//constant float INV_PI  = 1.0 / PI;
+constant float TO_RADIANS = 1.0 / 180.0 * PI;
+#define radians(d) (d * TO_RADIANS)
+
+
+fragment float4 ssss_pass_frag(constant AAPL::constant_ssss_pass& constants [[ buffer(0) ]],
+                               v2f_position_uv input [[stage_in]],
+                               texture2d<float> colorTex [[ texture(0) ]],
+                               depth2d<float> depthTex [[ texture(1) ]]
+                               //texture2d<float> strengthTex [[ texture(2) ]]
+                               )
+{
+    //out_color = SSSSBlurPS(uv, colorTex, depthTex, sssWidth, dir, initStencil);
+    float2 texcoord = input.uv;
+    
+    // Fetch color of current pixel:
+    float4 colorM = SSSSSamplePoint(colorTex, texcoord);
+    //float4 colorM = colorTex.sample(point_sampler, texcoord);
+    
+    // Initialize the stencil buffer in case it was not already available:
+    //if (constants.initStencil) // (Checked in compile time, it's optimized away)
+    //    if (SSSS_STREGTH_SOURCE == 0.0) discard_fragment();
+    
+    // Fetch linear depth of current pixel:
+    //float depthM = SSSSSamplePoint(depthTex, texcoord).r;
+    float depthM = 1.0 / SSSSSamplePoint(depthTex, texcoord);
+    
+    // Calculate the sssWidth scale (1.0 for a unit plane sitting on the
+    // projection window):
+    float distanceToProjectionWindow = 1.0 / tan(0.5 * radians(SSSS_FOVY));
+    float scale = distanceToProjectionWindow / depthM;
+    
+    // Calculate the final step to fetch the surrounding pixels:
+    float2 finalStep = constants.sssWidth * scale * constants.dir;
+    finalStep *= SSSS_STREGTH_SOURCE; // Modulate it using the alpha channel.
+    finalStep *= 1.0 / 3.0; // Divide by 3 as the kernels range from -3 to 3.
+    
+    // Accumulate the center sample:
+    float4 colorBlurred = colorM;
+    colorBlurred.rgb *= ssss_kernel[0].rgb;
+    
+    // Accumulate the other samples:
+    //SSSS_UNROLL
+    for (int i = 1; i < SSSS_N_SAMPLES; i++) {
+        // Fetch color and d    epth for current sample:
+        float2 offset = texcoord + ssss_kernel[i].a * finalStep;
+        float4 color = SSSSSample(colorTex, offset);
+        
+//#if SSSS_FOLLOW_SURFACE == 1
+//        // If the difference in depth is huge, we lerp color back to "colorM":
+//        float depth = SSSSSample(depthTex, offset).r;
+//        float s = SSSSSaturate(300.0f * distanceToProjectionWindow *
+//                               sssWidth * abs(depthM - depth));
+//        color.rgb = SSSSLerp(color.rgb, colorM.rgb, s);
+//#endif
+        
+        // Accumulate:
+        colorBlurred.rgb += ssss_kernel[i].rgb * color.rgb;
+    }
+    
+    return colorBlurred;
 }

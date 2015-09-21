@@ -37,7 +37,7 @@
     _device = MTLCreateSystemDefaultDevice();
     
     _metalLayer.device          = _device;
-    _metalLayer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+    _metalLayer.pixelFormat     = MTLPixelFormatBGRA8Unorm_sRGB;
     
     // this is the default but if we wanted to perform compute on the final rendering layer we could set this to no
     _metalLayer.framebufferOnly = YES;

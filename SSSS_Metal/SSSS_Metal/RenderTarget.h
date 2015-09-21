@@ -11,7 +11,7 @@
 
 #import <Metal/Metal.h>
 
-#include "RenderContex.h"
+#include "RenderContext.h"
 
 // A macro to disallow the copy constructor and operator= functions
 // This should be used in the private: declarations for a class
@@ -41,14 +41,14 @@ public:
     
     MTLPixelFormat pixel_format() const { return _format; }
     id <MTLTexture> texture() const { return _texture; }
-    //id <MTLTexture> msaa_texture() { return _msaa_texture; };
+    //id <MTLTexture> msaa_texture() const { return _msaa_texture; };
     
     virtual void init(id <MTLDevice> device, MTLPixelFormat format = MTLPixelFormatRGBA8Unorm, int width = 0, int height = 0)
     {
         _width = width;
         _height = height;
-        if (_width == 0) _width = RenderContex::window_width;
-        if (_height == 0) _height = RenderContex::window_height;
+        if (_width == 0) _width = RenderContext::window_width;
+        if (_height == 0) _height = RenderContext::window_height;
         _format = format;
         
         auto desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat: _format
@@ -57,13 +57,13 @@ public:
                                                                    mipmapped: NO];
         _texture = [device newTextureWithDescriptor: desc];
         
-        //auto msaa_desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat: _format
-        //                                                                    width: _width
-        //                                                                   height: _height
-        //                                                                mipmapped: NO];
-        //msaa_desc.textureType = MTLTextureType2DMultisample;
-        //msaa_desc.sampleCount = 4;
-        //_msaa_texture = [device newTextureWithDescriptor: msaa_desc];
+//        auto msaa_desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat: _format
+//                                                                            width: _width
+//                                                                           height: _height
+//                                                                        mipmapped: NO];
+//        msaa_desc.textureType = MTLTextureType2DMultisample;
+//        msaa_desc.sampleCount = 4;
+//        _msaa_texture = [device newTextureWithDescriptor: msaa_desc];
     }
 };
 
@@ -95,8 +95,8 @@ public:
     virtual void init(id <MTLDevice> device, int width = 0, int height = 0)
     {
         _width = width; _height = height;
-        if (_width == 0) _width = RenderContex::window_width;
-        if (_height == 0) _height = RenderContex::window_height;
+        if (_width == 0) _width = RenderContext::window_width;
+        if (_height == 0) _height = RenderContext::window_height;
         
         auto texture_desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat: _format
                                                                                width: _width
@@ -149,12 +149,19 @@ public:
     
     static glm::mat4 getViewProjectionTextureMatrix(glm::mat4 const & view, glm::mat4 const & projection)
     {
+//        static mat4 biasMatrix(
+//                               0.5, 0.0, 0.0, 0.0,
+//                               0.0, 0.5, 0.0, 0.0,
+//                               0.0, 0.0, 0.5, 0.0,
+//                               0.5, 0.5, 0.5, 1.0
+//                               );
         static mat4 biasMatrix(
                                0.5, 0.0, 0.0, 0.0,
-                               0.0, 0.5, 0.0, 0.0,
-                               0.0, 0.0, 0.5, 0.0,
-                               0.5, 0.5, 0.5, 1.0
+                               0.0, -0.5, 0.0, 0.0,
+                               0.0, 0.0, 1.0, 0.0,
+                               0.5, 0.5, 0, 1.0
                                );
+        //static mat4 biasMatrix = glm::translate(glm::mat4(1.0f), vec3(0.5f, 0.5f, 0)) * glm::scale(glm::mat4(1.0f), vec3(0.5, -0.5, 1.0f));
         //biasMatrix = mat4(1.0f);
         return biasMatrix * projection * view;
         //return projection * view;

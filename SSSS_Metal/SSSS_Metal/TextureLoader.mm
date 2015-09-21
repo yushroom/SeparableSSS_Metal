@@ -8,8 +8,8 @@ id <MTLTexture> TextureLoader::CreateTextureCubemap(id <MTLDevice> device, const
     gli::textureCube texture(gli::load_dds(path));
     assert(!texture.empty());
     //printf("%d %d\n", texture.levels(), texture.layers());
-    //gli::gl GL;
-    //gli::gl::format const format = GL.translate(texture.format());
+    gli::gl GL;
+    gli::gl::format const glformat = GL.translate(texture.format());
     //printf("%s\n\t%X %X %X\n", path, format.Internal, format.External, format.Type);
     
     assert(!gli::is_compressed(texture.format()));
@@ -97,6 +97,9 @@ id <MTLTexture> TextureLoader::CreateTexture(id <MTLDevice> device, const char* 
             break;
         case MTLPixelFormatRG8Unorm:
             bytes_per_pixel = 2;
+            break;
+        case MTLPixelFormatR8Unorm:
+            bytes_per_pixel = 1;
             break;
         default:
             break;

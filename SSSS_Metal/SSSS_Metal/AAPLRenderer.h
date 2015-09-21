@@ -16,4 +16,6 @@
 // load all assets before triggering rendering
 - (void)configure:(AAPLView *)view;
 
+- (void)enable_ssss: (BOOL)enabled;
+
 @end
