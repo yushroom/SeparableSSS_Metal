@@ -383,7 +383,7 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         float sss_width = 0.012f;
         //vec3 sss_strength = vec3(0.48f, 0.41f, 0.28f);
         //vec3 sss_falloff = vec3(1.0f, 0.37f, 0.3f);
-        float translucency = 0.1f;	// TODO 0.88
+        float translucency = 0.83f;
         
         //double speed = 1;
         float specularIntensity = 1.88f;

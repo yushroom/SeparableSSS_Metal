@@ -119,7 +119,7 @@ protected:
     
 public:
     
-    static const int SHADOW_MAP_SIZE = 1024;
+    static const int SHADOW_MAP_SIZE = 2048;
     
     ShadowMap() {}
     virtual ~ShadowMap() {}

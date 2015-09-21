@@ -69,7 +69,7 @@ vertex v2f_position shadow_pass_vert(constant AAPL::constants_mvp& constants [[ 
 {
     v2f_position output;
     output.position = constants.MVP * float4(positions[vid], 1.0);
-    //output.position.z *= output.position.w; // We want linear positions
+    output.position.z *= output.position.w / 10.0; // We want linear positions
     return output;
 }
 
@@ -168,14 +168,6 @@ float SpecularKSK(texture2d<float> beckmann_tex, float3 normal, float3 light, fl
     return NdotL * ksk;
 }
 
-// get original z [(mvp * v).z] from z in shadowMap
-float to_frag_z(float z)
-{
-    float far = 10.0f;
-    float near = 0.1f;
-    float frag_z = far*near / (far-z*(far-near));
-    return (frag_z-near)*far / (far-near);
-}
 
 //-----------------------------------------------------------------------------
 // Separable SSS Transmittance Function
@@ -198,13 +190,10 @@ vec3 SSSSTransmittance(float translucency, float sssWidth, vec3 worldPosition, v
     vec4 shadowPosition = lightViewProjection * shrinkedPos;
     
     
-    
-    shadowPosition.xyz /= shadowPosition.w;
-    //float d1 = texture(shadowMap, shadowPosition.xy).r;
+    shadowPosition.xy /= shadowPosition.w;
     float d1 = shadowMap.sample(point_sampler, shadowPosition.xy);
-    //d1 = to_frag_z(d1);
     float d2 = shadowPosition.z;
-    //d2 = 0.5 * d2 + 0.5;
+    d1 *= lightFarPlane;
     float d = scale * abs(d1 - d2);
     
     /**
@@ -268,12 +257,14 @@ fragment frag_out_main_pass main_pass_frag(constant AAPL::constant_main_pass& co
     for (int i = 0; i < N_LIGHTS; i++)
     {
         shadow_pos[i] = constants.lights[i].viewProjection * float4(input.world_position, 1);
-        shadow_pos[i].xyz /= shadow_pos[i].w;
-        //shadow_pos[i].z /= constants.lights[i].farPlane;
+        shadow_pos[i].xy /= shadow_pos[i].w;
+        shadow_pos[i].z /= constants.lights[i].farPlane;
     }
-    shadow[0] = shadow_maps_1.sample_compare(shadow_sampler, shadow_pos[0].xy, shadow_pos[0].z );
+    shadow[0] = shadow_maps_1.sample_compare(shadow_sampler, shadow_pos[0].xy, shadow_pos[0].z);
     shadow[1] = shadow_maps_2.sample_compare(shadow_sampler, shadow_pos[1].xy, shadow_pos[1].z);
     shadow[2] = shadow_maps_3.sample_compare(shadow_sampler, shadow_pos[2].xy, shadow_pos[2].z);
+    
+    //shadow[0] = shadow[1] = shadow[2];
     //shadow[0] = Sh
     
     //float4 out_color = vec4(0);
@@ -327,6 +318,8 @@ fragment frag_out_main_pass main_pass_frag(constant AAPL::constant_main_pass& co
     for (int i = 0; i < N_LIGHTS; i++)
         out_color.rgb += tColor[i] * bool(saturate(tSpot[i] - constants.lights[i].falloffStart));
     out_color.rgb += occlusion * constants.ambient * albedo.rgb * irradiance_tex.sample(linear_sampler, normal).rgb;
+    
+    out_color.a = albedo.a;
     
     frag_out_main_pass out;
     out.color = out_color;
