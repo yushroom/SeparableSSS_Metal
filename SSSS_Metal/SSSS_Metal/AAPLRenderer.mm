@@ -378,7 +378,7 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
 {
     {
         bool separate_speculars = false;
-        bool enable_ssss = true;
+        //bool enable_ssss = true;
         bool enable_sss_translucency = true;
         float sss_width = 0.012f;
         //vec3 sss_strength = vec3(0.48f, 0.41f, 0.28f);

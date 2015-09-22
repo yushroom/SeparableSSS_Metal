@@ -8,8 +8,8 @@ id <MTLTexture> TextureLoader::CreateTextureCubemap(id <MTLDevice> device, const
     gli::textureCube texture(gli::load_dds(path));
     assert(!texture.empty());
     //printf("%d %d\n", texture.levels(), texture.layers());
-    gli::gl GL;
-    gli::gl::format const glformat = GL.translate(texture.format());
+    //gli::gl GL;
+    //gli::gl::format const glformat = GL.translate(texture.format());
     //printf("%s\n\t%X %X %X\n", path, format.Internal, format.External, format.Type);
     
     assert(!gli::is_compressed(texture.format()));
@@ -61,7 +61,7 @@ id <MTLTexture> TextureLoader::CreateTexture(id <MTLDevice> device, const char* 
     uint32_t w = (uint32_t)texture.dimensions().x;
     uint32_t h = (uint32_t)texture.dimensions().y;
     
-    MTLPixelFormat mtl_format = MTLPixelFormatRGBA8Unorm;
+    //MTLPixelFormat mtl_format = MTLPixelFormatRGBA8Unorm;
     
     // hack
 //    int f = format.Internal;
@@ -104,7 +104,7 @@ id <MTLTexture> TextureLoader::CreateTexture(id <MTLDevice> device, const char* 
         default:
             break;
     }
-    auto bpp = texture.size() / w / h;
+    //auto bpp = texture.size() / w / h;
     //assert(bytes_per_row * h == texture.size());
     MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:w height:h mipmapped: YES];
     //desc.mipmapLevelCount = texture.levels();

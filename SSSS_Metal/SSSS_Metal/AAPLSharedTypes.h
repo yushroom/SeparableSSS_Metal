@@ -89,6 +89,19 @@ namespace AAPL
         float2 dir;
         bool initStencil;
     };
+    
+    struct constant_bloom_pass
+    {
+        // for blur
+        float2 step;
+        
+        // for comine
+        float exposure;
+        float bloomIntensity;
+        float defocus;
+        float2 pixelSize;
+        float2 direction;
+    };
 }
 
 

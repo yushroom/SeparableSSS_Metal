@@ -45,7 +45,7 @@ public:
         {
             _constants_buffer[i] = [device newBufferWithLength: sizeof(AAPL::constant_ssss_pass) options:0];
             _constants_buffer[i].label = [NSString stringWithFormat: @"ssss_pass_constant_buffer%i", i];
-            auto buffer = (AAPL::constant_ssss_pass*)[_constants_buffer[0] contents];
+            auto buffer = (AAPL::constant_ssss_pass*)[_constants_buffer[i] contents];
             buffer->sssWidth = this->sssWidth;
             //buffer->dir = {1.0f, 0.0f};
             buffer->initStencil = false;

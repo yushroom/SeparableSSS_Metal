@@ -137,7 +137,7 @@ vertex v2f_main_pass main_pass_vert(constant AAPL::constant_main_pass& constants
     return out;
 }
 
-float3 BumpMap(texture2d<float> normal_tex, float2 uv)
+static float3 BumpMap(texture2d<float> normal_tex, float2 uv)
 {
     float3 bump;
     bump.xy = -1.0 + 2.0 * normal_tex.sample(linear_sampler, uv).gr;
@@ -146,14 +146,14 @@ float3 BumpMap(texture2d<float> normal_tex, float2 uv)
 }
 
 // H: half
-float Fresnel(float3 H, float3 view, float f0) {
+static float Fresnel(float3 H, float3 view, float f0) {
     float base = 1.0 - dot(view, H);
     float exponential = pow(base, 5.0);
     return exponential + f0 * (1.0 - exponential);
 }
 
 
-float SpecularKSK(texture2d<float> beckmann_tex, float3 normal, float3 light, float3 view, float roughness, float specularFresnel)
+static float SpecularKSK(texture2d<float> beckmann_tex, float3 normal, float3 light, float3 view, float roughness, float specularFresnel)
 {
     float3 H = view + light;
     float3 HN = normalize(H);
@@ -172,7 +172,7 @@ float SpecularKSK(texture2d<float> beckmann_tex, float3 normal, float3 light, fl
 //-----------------------------------------------------------------------------
 // Separable SSS Transmittance Function
 
-vec3 SSSSTransmittance(float translucency, float sssWidth, vec3 worldPosition, vec3 worldNormal, vec3 light, depth2d<float> shadowMap, mat4 lightViewProjection, float lightFarPlane) {
+static vec3 SSSSTransmittance(float translucency, float sssWidth, vec3 worldPosition, vec3 worldNormal, vec3 light, depth2d<float> shadowMap, mat4 lightViewProjection, float lightFarPlane) {
     /**
      * Calculate the scale of the effect.
      */
@@ -216,8 +216,6 @@ vec3 SSSSTransmittance(float translucency, float sssWidth, vec3 worldPosition, v
      * the back of the object:
      */
     return profile * saturate(0.3 + dot(light, -worldNormal));
-    //return vec3(1);
-    //return vec3(textureProj(shadowMap, shadowPosition));
 }
 
 fragment frag_out_main_pass main_pass_frag(constant AAPL::constant_main_pass& constants [[ buffer(0) ]],
@@ -264,19 +262,13 @@ fragment frag_out_main_pass main_pass_frag(constant AAPL::constant_main_pass& co
     shadow[1] = shadow_maps_2.sample_compare(shadow_sampler, shadow_pos[1].xy, shadow_pos[1].z);
     shadow[2] = shadow_maps_3.sample_compare(shadow_sampler, shadow_pos[2].xy, shadow_pos[2].z);
     
-    //shadow[0] = shadow[1] = shadow[2];
-    //shadow[0] = Sh
-    
-    //float4 out_color = vec4(0);
-    //float4 out_specular_color = vec4(0);
-    
     float3 tL[N_LIGHTS];
     float tSpot[N_LIGHTS];
-    //float3 tf1[N_LIGHTS];
     float3 tf2[N_LIGHTS];
     float3 tColor[N_LIGHTS];
     
-    for (int i = 0; i < N_LIGHTS; i++)
+    //for (int i = 0; i < N_LIGHTS; i++)
+    int i = 0;
     {
         constant auto& light = constants.lights[i];
         float3 L = light.position - input.world_position;
@@ -288,7 +280,7 @@ fragment frag_out_main_pass main_pass_frag(constant AAPL::constant_main_pass& co
         tSpot[i] = spot;
         
         //if (spot > light.falloffStart) // DO NOT USE [if], IT'S VERY SLOW !!!!
-        {
+        //{
             float curve = min(pow(dist / light.farPlane, 6.0), 1.0);
             float attenuation = mix(1.0 / (1.0 + light.attenuation * dist * dist), 0.0, curve);
             
@@ -303,7 +295,67 @@ fragment frag_out_main_pass main_pass_frag(constant AAPL::constant_main_pass& co
             
             //out_color.rgb += shadow[i] * (f2 * diffuse + f1 * specular);
             tColor[i] = shadow[i] * (f2 * diffuse + f1 * specular);
-        }
+        //}
+    }
+    
+    i = 1;
+    {
+        constant auto& light = constants.lights[i];
+        float3 L = light.position - input.world_position;
+        float dist = length(L);
+        L /= dist;
+        tL[i] = L;
+        
+        float spot = dot(light.direction, -L);
+        tSpot[i] = spot;
+        
+        //if (spot > light.falloffStart) // DO NOT USE [if], IT'S VERY SLOW !!!!
+        //{
+        float curve = min(pow(dist / light.farPlane, 6.0), 1.0);
+        float attenuation = mix(1.0 / (1.0 + light.attenuation * dist * dist), 0.0, curve);
+        
+        spot = saturate((spot - light.falloffStart) / light.falloffWidth);
+        
+        float3 f1 = light.color * attenuation * spot;
+        float3 f2 = albedo.rgb * f1;
+        tf2[i] = f2;
+        
+        float3 diffuse = saturate(dot(L, normal));
+        float specular = intensity * SpecularKSK(beckmann_tex, normal, L, view, roughness, constants.specularFresnel);
+        
+        //out_color.rgb += shadow[i] * (f2 * diffuse + f1 * specular);
+        tColor[i] = shadow[i] * (f2 * diffuse + f1 * specular);
+        //}
+    }
+
+    i = 2;
+    {
+        constant auto& light = constants.lights[i];
+        float3 L = light.position - input.world_position;
+        float dist = length(L);
+        L /= dist;
+        tL[i] = L;
+        
+        float spot = dot(light.direction, -L);
+        tSpot[i] = spot;
+        
+        //if (spot > light.falloffStart) // DO NOT USE [if], IT'S VERY SLOW !!!!
+        //{
+        float curve = min(pow(dist / light.farPlane, 6.0), 1.0);
+        float attenuation = mix(1.0 / (1.0 + light.attenuation * dist * dist), 0.0, curve);
+        
+        spot = saturate((spot - light.falloffStart) / light.falloffWidth);
+        
+        float3 f1 = light.color * attenuation * spot;
+        float3 f2 = albedo.rgb * f1;
+        tf2[i] = f2;
+        
+        float3 diffuse = saturate(dot(L, normal));
+        float specular = intensity * SpecularKSK(beckmann_tex, normal, L, view, roughness, constants.specularFresnel);
+        
+        //out_color.rgb += shadow[i] * (f2 * diffuse + f1 * specular);
+        tColor[i] = shadow[i] * (f2 * diffuse + f1 * specular);
+        //}
     }
     
     //if (tSpot[0] > constants.lights[0].falloffStart)
@@ -315,9 +367,14 @@ fragment frag_out_main_pass main_pass_frag(constant AAPL::constant_main_pass& co
 //    if (tSpot[2] > constants.lights[2].falloffStart)
         tColor[2] += tf2[2] * SSSSTransmittance(constants.translucency, constants.sssWidth, input.world_position.xyz,
                                                 normalize(input.normal), tL[2], shadow_maps_3, constants.lights[2].viewProjection, constants.lights[2].farPlane);
-    for (int i = 0; i < N_LIGHTS; i++)
-        out_color.rgb += tColor[i] * bool(saturate(tSpot[i] - constants.lights[i].falloffStart));
+    
+    out_color.rgb += tColor[0] * bool(saturate(tSpot[0] - constants.lights[0].falloffStart));
+    out_color.rgb += tColor[1] * bool(saturate(tSpot[1] - constants.lights[1].falloffStart));
+    out_color.rgb += tColor[2] * bool(saturate(tSpot[2] - constants.lights[2].falloffStart));
+
     out_color.rgb += occlusion * constants.ambient * albedo.rgb * irradiance_tex.sample(linear_sampler, normal).rgb;
+    
+    //out_color.rgb = tColor[1];
     
     out_color.a = albedo.a;
     
@@ -419,3 +476,27 @@ fragment float4 ssss_pass_frag(constant AAPL::constant_ssss_pass& constants [[ b
     
     return colorBlurred;
 }
+
+
+// ssss passconstant_ssss_pass
+//***********************************************************************
+#define N_PASSES 6
+#define N_SAMPLES 5
+
+fragment float4 bloom_blur_frag(constant AAPL::constant_bloom_pass& constants [[ buffer(0) ]],
+                               v2f_position_uv input [[stage_in]],
+                               texture2d<float> srcTex [[ texture(0) ]]
+                               )
+{
+    float offsets[] = { -1.282, -0.524, 0.0, 0.524, 1.282 };
+    const float n = 5.0;
+    
+    float4 out_color = float4(0, 0, 0, 0);
+    for (int i = 0; i < N_SAMPLES; i++)
+    {
+        out_color += srcTex.sample(point_sampler, input.uv + constants.step * offsets[i]);
+    }
+    out_color /= n;
+    return out_color;
+}
+
