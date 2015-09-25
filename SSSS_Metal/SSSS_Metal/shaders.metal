@@ -478,12 +478,13 @@ fragment float4 ssss_pass_frag(constant AAPL::constant_ssss_pass& constants [[ b
 }
 
 
+//***********************************************************************
 // ssss passconstant_ssss_pass
 //***********************************************************************
 #define N_PASSES 6
 #define N_SAMPLES 5
 
-fragment float4 bloom_blur_frag(constant AAPL::constant_bloom_pass& constants [[ buffer(0) ]],
+fragment float4 bloom_blur_frag(constant AAPL::constant_bloom_pass_blur& constants [[ buffer(0) ]],
                                v2f_position_uv input [[stage_in]],
                                texture2d<float> srcTex [[ texture(0) ]]
                                )
@@ -500,3 +501,190 @@ fragment float4 bloom_blur_frag(constant AAPL::constant_bloom_pass& constants [[
     return out_color;
 }
 
+
+
+
+static float3 FilmicTonemap(float3 x) {
+    float A = 0.15;
+    float B = 0.50;
+    float C = 0.10;
+    float D = 0.20;
+    float E = 0.02;
+    float F = 0.30;
+    //float W = 11.2;
+    return ((x*(A*x+C*B)+D*E) / (x*(A*x+B)+D*F))- E / F;
+}
+
+#define TONEMAP_LINEAR 0
+#define TONEMAP_EXPONENTIAL 1
+#define TONEMAP_EXPONENTIAL_HSV 2
+#define TONEMAP_REINHARD 3
+#define TONEMAP_FILMIC 4
+#define TONEMAP_OPERATOR TONEMAP_FILMIC
+
+static float3 DoToneMap(float3 color, float exposure) {
+#if TONEMAP_OPERATOR == TONEMAP_LINEAR
+    return exposure * color;
+#elif TONEMAP_OPERATOR == TONEMAP_EXPONENTIAL
+    color = 1.0 - exp2(-exposure * color);
+    return color;
+#elif TONEMAP_OPERATOR == TONEMAP_EXPONENTIAL_HSV
+    color = rgb2hsv(color);
+    color.b = 1.0 - exp2(-exposure * color.b);
+    color = hsv2rgb(color);
+    return color;
+#elif TONEMAP_OPERATOR == TONEMAP_REINHARD
+    color = xyz2Yxy(rgb2xyz(color));
+    float L = color.r;
+    L *= exposure;
+    float LL = 1 + L / (burnout * burnout);
+    float L_d = L * LL / (1 + L);
+    color.r = L_d;
+    color = xyz2rgb(Yxy2xyz(color));
+    return color;
+#else // TONEMAP_FILMIC
+    color = 2.0f * FilmicTonemap(exposure * color);
+    float3 whiteScale = 1.0f / FilmicTonemap(vec3(11.2));
+    color *= whiteScale;
+    return color;
+#endif
+}
+
+#define Texture(tex, uv) tex.sample(point_sampler, (uv))
+
+static float4 PyramidFilter(texture2d<float> tex, float2 uv, float2 width) {
+    float4 color = Texture(tex, uv + vec2(0.5, 0.5) * width);
+    color += Texture(tex, uv + vec2(-0.5,  0.5) * width);
+    color += Texture(tex, uv + vec2( 0.5, -0.5) * width);
+    color += Texture(tex, uv + vec2(-0.5, -0.5) * width);
+    return 0.25 * color;
+}
+
+#define PROCESS(index) \
+{\
+    float4 sample = srcTex_##index.sample(linear_sampler, input.uv);  \
+    out_color.rgb += constants.bloomIntensity * w[ index ] * sample.rgb / 127.0; \
+    out_color.a += sample.a / N_PASSES; \
+}
+
+
+fragment float4 bloom_combine_frag(constant AAPL::constant_bloom_pass_combine& constants [[ buffer(0) ]],
+                                   v2f_position_uv input [[stage_in]],
+                                   texture2d<float> finalTex [[ texture(0) ]],
+                                   texture2d<float> srcTex_0 [[ texture(1) ]],
+                                   texture2d<float> srcTex_1 [[ texture(2) ]],
+                                   texture2d<float> srcTex_2 [[ texture(3) ]],
+                                   texture2d<float> srcTex_3 [[ texture(4) ]],
+                                   texture2d<float> srcTex_4 [[ texture(5) ]],
+                                   texture2d<float> srcTex_5 [[ texture(6) ]])
+{
+    
+    float w[] = {64.0, 32.0, 16.0, 8.0, 4.0, 2.0, 1.0};
+    
+    float4 out_color = PyramidFilter(finalTex, input.uv, constants.pixelSize * constants.defocus);
+    PROCESS(0)
+    PROCESS(1)
+    PROCESS(2)
+    PROCESS(3)
+    PROCESS(4)
+    PROCESS(5)
+    
+    out_color.rgb = DoToneMap(out_color.rgb, constants.exposure);
+    
+    return out_color;
+}
+
+#undef PROCESS
+
+
+fragment float4 bloom_glare_detection_frag(constant AAPL::constant_bloom_pass_glare& constants [[ buffer(0) ]],
+                                   v2f_position_uv input [[stage_in]],
+                                   texture2d<float> finalTex [[ texture(0) ]])
+{
+    float2 offsets[] = {
+                       float2( 0.0,  0.0),
+                       float2(-1.0,  0.0),
+                       float2( 1.0,  0.0),
+                       float2( 0.0, -1.0),
+                       float2( 0.0,  1.0)
+    };
+    
+    float4 color = Texture(finalTex, input.uv + offsets[0] * constants.pixelSize);
+    for (int i = 1; i < 5; i++)
+    {
+        color = min(Texture(finalTex, input.uv + offsets[i] * constants.pixelSize), color);
+    }
+    color.rgb *= constants.exposure;
+    
+    return float4(max(color.rgb - constants.bloomThreshold / (1.0 - constants.bloomThreshold), 0.0), color.a);
+}
+
+
+//***********************************************************************
+// ssss passconstant_ssss_pass
+//***********************************************************************
+#define N_SAMPLES 5
+
+#define PROCESS(index) \
+{\
+    float tapCoC = cocTex.sample(linear_sampler, input.uv + constants.step * offsets[ index ] * CoC).r;   \
+    float4 tap = blurredTex.sample(linear_sampler, input.uv + constants.step * offsets[ index ] * CoC);   \
+    float contribution = tapCoC > CoC ? 1.0f : tapCoC;  \
+    color += contribution * tap;    \
+    sum += contribution;    \
+}
+
+fragment float4 dof_blur_frag(constant AAPL::constant_dof_pass_blur& constants [[ buffer(0) ]],
+                              v2f_position_uv input [[ stage_in ]],
+                              texture2d<float> blurredTex [[ texture(0) ]],
+                              texture2d<float> cocTex [[ texture(1) ]])
+{
+    float offsets[] = { -1.282, -0.524, 0.524, 1.282 };
+    const int n = 4;
+    
+    //float CoC = texture(cocTex, uv).r;
+    float CoC = cocTex.sample(linear_sampler, input.uv).r;
+    
+    //vec4 color = texture(blurredTex, uv);
+    float4 color = blurredTex.sample(linear_sampler, input.uv);
+    float sum = 1.0f;
+//    for (int i = 0; i < n; i++)
+//    {
+//        float tapCoC = cocTex.sample(linear_sampler, input.uv + constants.step * offsets[i] * CoC).r;
+//        float4 tap = blurredTex.sample(linear_sampler, input.uv + constants.step * offsets[i] * CoC);
+//        
+//        float contribution = tapCoC > CoC ? 1.0f : tapCoC;
+//        color += contribution * tap;
+//        sum += contribution;
+//    }
+    PROCESS(0)
+    PROCESS(1)
+    PROCESS(2)
+    PROCESS(3)
+    
+    return color / sum;
+}
+
+
+fragment float dof_coc_frag(constant AAPL::constant_dof_pass_coc& constants [[ buffer(0) ]],
+                              v2f_position_uv input [[ stage_in ]],
+                              texture2d<float> depthTex [[ texture(0) ]])
+{
+    float depth = 1.0 / depthTex.sample(point_sampler, input.uv).r;
+    float d = abs(depth - constants.focusDistance) - constants.focusRange / 2.0f;
+    float out_color = 0;
+    if (d > 0.0)
+    {
+        float t = saturate(d);
+        if (depth - constants.focusDistance > 0.0)
+            out_color = saturate( t * constants.focusFalloff.x );
+        else
+            out_color = saturate( t * constants.focusFalloff.y );
+    }
+    else
+    {
+        out_color = 0;
+    }
+    
+    return out_color;
+}

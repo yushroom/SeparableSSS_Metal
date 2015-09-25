@@ -26,6 +26,10 @@
 #include "Light.hpp"
 
 #include "SeparableSSS.h"
+#include "Bloom.h"
+#include "DepthOfField.h"
+
+#include "DepthOfField.h"
 
 #define CAMERA_FOV 20.0f
 #define PI 3.1415926536f
@@ -65,6 +69,7 @@ using namespace simd;
     
     DepthStencil    _depth_stencil;
     RenderTexture   _rt_main;
+    RenderTexture   _rt_temp;
     RenderTexture   _rt_depth;
     
     Model       _model_head;
@@ -74,8 +79,17 @@ using namespace simd;
     Light       _lights[N_LIGHTS];
     
     bool        enable_ssss;
+    bool        enable_bloom;
+    bool        enable_dof;
     
     SeparableSSS ssss;
+    Bloom bloom;
+    DepthOfField dof;
+    
+    // for dof
+    float focus_dist;
+    float focus_range;
+    float focus_falloff;
     
     id <MTLTexture>     _tex_sky;
     id <MTLTexture>     _tex_head_diffuse;
@@ -106,10 +120,10 @@ using namespace simd;
 {
     // find a usable Device
     _device = view.device;
-    
-    
+
     enable_ssss = true;
-    
+    enable_bloom = true;
+    enable_dof = true;
     
     int width = view.bounds.size.width * 2;
     int height = view.bounds.size.height * 2;
@@ -184,6 +198,7 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
     load_preset(IOS_PATH("Preset", "Preset9", "txt"), _camera, _lights);
     
     _rt_main.init(_device, MTLPixelFormatRGBA8Unorm);
+    _rt_temp.init(_device, MTLPixelFormatRGBA8Unorm);
     _rt_depth.init(_device, MTLPixelFormatR32Float);
     _depth_stencil.init(_device);
     
@@ -204,6 +219,19 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
     SeparableSSS::static_init();
     ssss.init(_device, CAMERA_FOV, 0.012f);
     ssss.prepare_pipeline_state(_device, _defaultLibrary, _rt_main);
+    
+    float exposure = 2.0f;
+    Bloom::static_init();
+    bloom.init(_device, Bloom::TONEMAP_FILMIC, exposure, 0.63f, 1.0f, 1.0f, 0.2f);
+    bloom.prepare_pipeline_state(_device, _defaultLibrary);
+    
+    //bool enable_dof = true;
+    focus_dist = 0.66f;
+    focus_range = 0.76f;
+    focus_falloff = 15.0f;
+    DepthOfField::static_init();
+    dof.init(_device, 0.66f, 0.76f, vec2(15.0f, 15.0f), 2.5f);
+    dof.prepare_pipeline_state(_device, _defaultLibrary);
     
     
     // Shader loading
@@ -526,7 +554,24 @@ void load_preset(std::string path, Camera& _camera, Light* lights)
         ssss.render(commandBuffer, _rt_main, _rt_depth, _depth_stencil);
     }
     
-    [self DrawTextureToScreen: _rt_main.texture() commandBuffer: commandBuffer view: view];
+    auto rt_to_next_stage = &_rt_main;
+    
+    if (enable_bloom)
+    {
+        bloom.render(commandBuffer, rt_to_next_stage, &_rt_temp);
+        rt_to_next_stage = &_rt_temp;
+    }
+    
+    if (enable_dof)
+    {
+        dof.set_focus_distance(_camera.getDistance() - 1.0f + focus_dist);
+        dof.set_focus_falloff(focus_falloff);
+        dof.set_focus_range(powf(focus_range, 5.0f));
+        dof.render(commandBuffer, *rt_to_next_stage, _rt_main, _rt_depth);
+        rt_to_next_stage = &_rt_main;
+    }
+    
+    [self DrawTextureToScreen: rt_to_next_stage->texture() commandBuffer: commandBuffer view: view];
     
     [commandBuffer presentDrawable: view.currentDrawable];
     

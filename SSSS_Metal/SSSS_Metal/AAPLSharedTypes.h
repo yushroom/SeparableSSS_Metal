@@ -90,17 +90,53 @@ namespace AAPL
         bool initStencil;
     };
     
-    struct constant_bloom_pass
+    struct constant_bloom_pass_glare
     {
-        // for blur
+        float exposure;
+        float2 pixelSize;
+        float bloomThreshold;
+    };
+    
+    struct constant_bloom_pass_blur
+    {
         float2 step;
-        
-        // for comine
+    };
+    
+    struct constant_bloom_pass_combine
+    {
         float exposure;
         float bloomIntensity;
         float defocus;
         float2 pixelSize;
-        float2 direction;
+        //float2 direction;
+    };
+    
+//    struct constant_bloom_pass
+//    {
+//        // for blur
+//        float2 step;
+//        
+//        // for comine
+//        float exposure;
+//        float bloomIntensity;
+//        float defocus;
+//        float2 pixelSize;   // also for glareDetection
+//        float2 direction;
+//        
+//        // for glareDetection
+//        float bloomThreshold;
+//    };
+    
+    struct constant_dof_pass_blur
+    {
+        float2 step;
+    };
+    
+    struct constant_dof_pass_coc
+    {
+        float focusDistance;
+        float focusRange;
+        float2 focusFalloff;
     };
 }
 

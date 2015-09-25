@@ -15,6 +15,7 @@
 @interface AAPLViewController ()
 
 - (IBAction)switchSSSSAction:(id)sender;
+@property (weak, nonatomic) IBOutlet UILabel *fps_label;
 
 @end
 
@@ -34,6 +35,8 @@
     
     // our renderer instance
     AAPLRenderer *_renderer;
+    
+    NSTimeInterval _time_intervals_30_frames;
 }
 
 - (void)dealloc
@@ -131,9 +134,17 @@
                  forMode:NSDefaultRunLoopMode];
 }
 
+- (void)set_fps_label
+{
+    
+    _fps_label.text = [NSString stringWithFormat: @"FPS: %f", 1.0f / (_time_intervals_30_frames / 30.0f)];
+}
+
 // the main game loop called by the timer above
 - (void)gameloop
 {
+    static int frames = 0;
+    frames++;
     
     // tell our delegate to update itself here.
     [_delegate update:self];
@@ -141,9 +152,10 @@
     if(!_firstDrawOccurred)
     {
         // set up timing data for display since this is the first time through this loop
-        _timeSinceLastDraw             = 0.0;
-        _timeSinceLastDrawPreviousTime = CACurrentMediaTime();
+        _timeSinceLastDraw              = 0.0;
+        _timeSinceLastDrawPreviousTime  = CACurrentMediaTime();
         _firstDrawOccurred              = YES;
+        _time_intervals_30_frames       = 0.0f;
     }
     else
     {
@@ -152,9 +164,19 @@
         
         _timeSinceLastDraw = currentTime - _timeSinceLastDrawPreviousTime;
         
+        _time_intervals_30_frames += _timeSinceLastDraw;
+        if (frames >= 30)
+        {
+            [self set_fps_label];
+            frames -= 30;
+            _time_intervals_30_frames = 0;
+        }
+        
         // keep track of the time interval between draws
         _timeSinceLastDrawPreviousTime = currentTime;
     }
+    
+    //NSLog(@"time: %f", _timeSinceLastDraw);
     
     // display (render)
     
